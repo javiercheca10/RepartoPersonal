@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -56,7 +57,16 @@ class SolverWorkerThread(QThread):
     finished_signal = Signal(object, object, object, str, str)
     error_signal = Signal(str)
 
-    def __init__(self, year: int, month: int, start_cycle_day: int, seq_path: Path, pref_path: Path, out_dir: Path):
+    def __init__(
+        self,
+        year: int,
+        month: int,
+        start_cycle_day: int,
+        seq_path: Path,
+        pref_path: Path,
+        out_dir: Path,
+        time_limit: float = 15.0,
+    ):
         super().__init__()
         self.year = year
         self.month = month
@@ -64,6 +74,7 @@ class SolverWorkerThread(QThread):
         self.seq_path = seq_path
         self.pref_path = pref_path
         self.out_dir = out_dir
+        self.time_limit = time_limit
 
     def run(self):
         try:
@@ -74,7 +85,7 @@ class SolverWorkerThread(QThread):
             schedules = project_month(self.year, self.month, self.start_cycle_day, workers)
 
             self.progress_signal.emit("Optimizando asignación y equidad de puestos con CP-SAT...", 60)
-            result = solve_month(self.year, self.month, schedules, workers, time_limit_seconds=15.0)
+            result = solve_month(self.year, self.month, schedules, workers, time_limit_seconds=self.time_limit)
 
             if not result.is_optimal and len(result.assignments) == 0:
                 self.error_signal.emit(
@@ -235,6 +246,20 @@ class MainWindow(QMainWindow):
         cycle_box.addWidget(self.cycle_combo)
         form_layout.addLayout(cycle_box)
 
+        time_box = QVBoxLayout()
+        time_box.setSpacing(4)
+        time_lbl = QLabel("Tiempo Máx. Cómputo (seg):")
+        time_lbl.setObjectName("fieldLabel")
+        self.time_spin = QSpinBox()
+        self.time_spin.setRange(5, 300)
+        self.time_spin.setValue(15)
+        self.time_spin.setSingleStep(5)
+        self.time_spin.setSuffix(" s")
+        self.time_spin.setToolTip("Tiempo máximo de cálculo para el solver (segundos). Valores más altos permiten mayor equidad.")
+        time_box.addWidget(time_lbl)
+        time_box.addWidget(self.time_spin)
+        form_layout.addLayout(time_box)
+
         params_card_layout.addLayout(form_layout)
         main_layout.addWidget(params_card)
 
@@ -306,11 +331,11 @@ class MainWindow(QMainWindow):
             #fieldLabel { font-size: 12px; font-weight: 600; color: #334155; }
             #statusLabel { font-size: 13px; font-weight: 600; color: #059669; }
             #pathLabel { font-size: 13px; color: #64748B; }
-            QComboBox {
+            QComboBox, QSpinBox {
                 background-color: #FFFFFF; border: 1px solid #CBD5E1;
                 border-radius: 6px; padding: 6px 10px; font-size: 13px; color: #0F172A;
             }
-            QComboBox:focus { border: 2px solid #2563EB; }
+            QComboBox:focus, QSpinBox:focus { border: 2px solid #2563EB; }
             #generateButton {
                 background-color: #1E3A8A; color: #FFFFFF; font-size: 15px; font-weight: bold;
                 border: none; border-radius: 8px; padding: 12px 24px;
@@ -405,6 +430,8 @@ class MainWindow(QMainWindow):
                 self.status_lbl.setText("Generación cancelada por desalineación de ciclo.")
                 return
 
+        time_limit = float(self.time_spin.value())
+
         self.thread = SolverWorkerThread(
             year=year,
             month=month,
@@ -412,6 +439,7 @@ class MainWindow(QMainWindow):
             seq_path=self.seq_path,
             pref_path=self.pref_path,
             out_dir=self.out_dir,
+            time_limit=time_limit,
         )
         self.thread.progress_signal.connect(self._on_progress)
         self.thread.finished_signal.connect(self._on_finished)
