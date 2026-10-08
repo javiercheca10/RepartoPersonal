@@ -1,0 +1,33 @@
+# Entornos virtuales y caches
+.venv/
+.uv-cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+*.spec
+*.sqlite*
+*.db
+.pytest_cache/
+outputs/
+datos/
+
+# Datos reales y salidas con datos personales (nunca subir a repositorios públicos)
+*.xls
+*.xlsx
+*.pdf
+resultados/
+*/resultados/
+*/configuracion/
+RepartoRadiologia*/
+RepartoPersonal/configuracion/
+!RepartoPersonal/configuracion_ejemplo/
+!RepartoPersonal/configuracion_ejemplo/*.xlsx
+RepartoPersonal/resultados/
+RepartoPersonal/dist/
+RepartoPersonal/build/
+
+# Archivos de contexto interno
+AGENTS.md
+CONTEXTO_Y_ARQUITECTURA.md

@@ -1,0 +1,29 @@
+========================================================================
+   REPARTO PERSONAL — PLANIFICACIÓN Y ASIGNACIÓN DE TURNOS
+========================================================================
+
+Esta carpeta contiene todo lo necesario para ejecutar el generador
+de cuadrantes mensuales sin necesidad de usar la consola.
+
+ESTRUCTURA DE LA CARPETA:
+-------------------------
+📁 RepartoPersonal/
+   ├── 🚀 iniciar.py                       <-- Programa ejecutable
+   │
+   ├── 📁 configuracion/                   <-- Archivos de entrada (Excel)
+   │    ├── 📊 Secuencias_Turnos_Limpio.xlsx
+   │    └── 📊 Plantilla_Conocimientos_y_Preferencias.xlsx
+   │
+   └── 📁 resultados/                      <-- Aquí se guardan los cuadrantes
+        ├── Cuadrante_[Mes]_[Año].xlsx     (Excel oficial)
+        └── Cuadrante_[Mes]_[Año].pdf      (PDF para imprimir)
+
+CÓMO USAR EL PROGRAMA:
+----------------------
+1. Si ha cambiado alguna persona de puesto o sus preferencias, modifique
+   el archivo dentro de 'configuracion/Plantilla_Conocimientos_y_Preferencias.xlsx'.
+2. Ejecute el programa haciendo doble clic en 'iniciar.py' (o el ejecutable .exe).
+3. Seleccione el Mes y Año que desea planificar.
+   En el desplegable, indique qué día del ciclo (1 a 168) corresponde al día 1 de ese mes (ejemplo: si el día 1 es el día 65 del ciclo, seleccione 65).
+4. Pulse el botón azul «Generar Cuadrante Mensual».
+5. Al terminar, pulse «Abrir Cuadrante Excel» o «Abrir Cuadrante PDF».
