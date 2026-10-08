@@ -268,6 +268,24 @@ def solve_month(
     # Suma total de puntos (maximizar satisfacción general de preferencias)
     total_points_sum = sum(worker_pts.values()) if worker_pts else 0
 
+    # Penalización suave: evitar más de 2 días consecutivos en el mismo puesto (si es posible)
+    consec_penalty_vars = []
+    for i in range(len(workdays) - 2):
+        d1, d2, d3 = workdays[i].day, workdays[i + 1].day, workdays[i + 2].day
+        for w in workers:
+            if len(w.skills - w.vetoes) <= 1:
+                continue
+            for pos in POSITIONS:
+                vars_d1 = [x[d1, sh, w.id, pos] for sh in ("M", "T") if (d1, sh, w.id, pos) in x]
+                vars_d2 = [x[d2, sh, w.id, pos] for sh in ("M", "T") if (d2, sh, w.id, pos) in x]
+                vars_d3 = [x[d3, sh, w.id, pos] for sh in ("M", "T") if (d3, sh, w.id, pos) in x]
+                if vars_d1 and vars_d2 and vars_d3:
+                    viol = model.new_bool_var(f"consec_{w.id}_{pos}_{d1}")
+                    model.add(viol >= sum(vars_d1) + sum(vars_d2) + sum(vars_d3) - 2)
+                    consec_penalty_vars.append(viol)
+
+    total_consec_penalty = sum(consec_penalty_vars) if consec_penalty_vars else 0
+
     # 6. Optimización Lexicográfica en Fases:
     solver = cp_model.CpSolver()
     solver.parameters.random_seed = 42
@@ -318,9 +336,13 @@ def solve_month(
             is_optimal = False
         model.add(total_dr_vacancies == opt_dr_vacancies)
 
-    # Fase 3: Equidad D016 (Minimizar dispersión de medias escaladas) y suma de puntos
-    # spread_scaled * 10000 asegura prioridad estricta sobre total_points_sum (~10000)
-    model.minimize(spread_scaled * 10000 + total_points_sum)
+    model.clear_hints()
+    for v in x.values():
+        model.add_hint(v, solver.value(v))
+
+    # Fase 3: Equidad D016 (Minimizar dispersión de medias escaladas), no repetir >2 días y suma de puntos
+    # spread_scaled * 10000 asegura prioridad sobre total_consec_penalty * 500 y total_points_sum
+    model.minimize(spread_scaled * 10000 + total_consec_penalty * 500 + total_points_sum)
     rem_time = max(1.0, time_limit_seconds - (perf_counter() - start_time))
     solver.parameters.max_time_in_seconds = rem_time
     st3 = solver.solve(model)

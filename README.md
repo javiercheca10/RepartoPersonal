@@ -26,12 +26,13 @@ El sistema formula un modelo de programación por restricciones con **Google OR-
 
 - 🧠 **Optimización con CP-SAT (3 Fases)**:
   - **Fase 1 (Viabilidad y Cobertura)**: Maximiza la cobertura de puestos obligatorios y dotaciones mínimas.
-  - **Fase 2 (Equidad de Esfuerzo - Minimax D016)**: Minimiza la dispersión (*spread*) entre el trabajador con mayor carga promedio del mes y el de menor carga.
-  - **Fase 3 (Preferencias Individuales)**: Maximiza las afinidades de cada trabajador dentro del rango óptimo de equidad garantizado.
-- 🛡️ **Respeto Estricto de Restricciones**:
+  - **Fase 2 (Vacantes DR)**: Minimiza reducciones y vacantes en puestos DR.
+  - **Fase 3 (Equidad, Rotación y Preferencias)**: Minimiza la dispersión (*spread*) de esfuerzo promedio (Minimax D016), evita repeticiones monótonas de un mismo puesto y maximiza las afinidades individuales.
+- 🛡️ **Respeto Estricto de Restricciones y Ergonomía Laboral**:
   - Nadie cubre un puesto sin tener acreditado el conocimiento.
   - Prohibición estricta de puestos vetados.
   - Un trabajador solo puede ser asignado en su turno disponible (Mañana o Tarde).
+  - **Rotación continua de puestos**: Se penaliza que un trabajador repita el mismo puesto más de 2 días seguidos si tiene alternativas, garantizando ergonomía y variedad sin comprometer nunca la cobertura del servicio ni añadir vacantes.
 - 🏖️ **Gestión de Bajas Laborales**:
   - Soporte para marcar trabajadores en estado `BAJA`, excluyéndolos automáticamente del cálculo mensual.
 - 🔍 **Detección y Auditoría de Vacantes**:
