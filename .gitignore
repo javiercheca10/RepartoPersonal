@@ -31,3 +31,10 @@ RepartoPersonal/build/
 # Archivos de contexto interno
 AGENTS.md
 CONTEXTO_Y_ARQUITECTURA.md
+
+# Tests
+tests/
+test/
+**/tests/
+**/test/
+*test*.py
