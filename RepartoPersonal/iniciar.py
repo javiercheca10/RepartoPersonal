@@ -38,6 +38,7 @@ else:
 
 sys.path.insert(0, str(APP_DIR))
 
+from reparto.assets import get_app_icon, get_app_pixmap, setup_windows_app_id
 from reparto.datos import (
     cycle_day_matches_weekday,
     load_all_workers,
@@ -140,12 +141,8 @@ class MainWindow(QMainWindow):
         self.last_excel_path = ""
         self.last_pdf_path = ""
 
-        # Identidad visual e icono
-        self.icon_path = APP_DIR / "reparto" / "assets" / "icono.png"
-        if not self.icon_path.exists():
-            self.icon_path = APP_DIR / "reparto" / "assets" / "icono_48.png"
-        if self.icon_path.exists():
-            self.setWindowIcon(QIcon(str(self.icon_path)))
+        # Identidad visual e icono de ventana
+        self.setWindowIcon(get_app_icon())
 
         self._setup_ui()
         self._apply_styles()
@@ -163,10 +160,10 @@ class MainWindow(QMainWindow):
         header_row.setSpacing(14)
         header_row.setAlignment(Qt.AlignVCenter)
 
-        if self.icon_path.exists():
+        icon_pixmap = get_app_pixmap(48)
+        if not icon_pixmap.isNull():
             icon_lbl = QLabel()
-            pix = QPixmap(str(self.icon_path)).scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            icon_lbl.setPixmap(pix)
+            icon_lbl.setPixmap(icon_pixmap)
             icon_lbl.setFixedSize(48, 48)
             icon_lbl.setObjectName("headerAppIcon")
             header_row.addWidget(icon_lbl)
@@ -780,11 +777,10 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    setup_windows_app_id()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    icon_path = APP_DIR / "reparto" / "assets" / "icono.png"
-    if icon_path.exists():
-        app.setWindowIcon(QIcon(str(icon_path)))
+    app.setWindowIcon(get_app_icon())
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

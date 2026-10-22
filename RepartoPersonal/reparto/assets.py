@@ -1,0 +1,70 @@
+"""Gestión de recursos visuales e iconos de la aplicación.
+
+Garantiza la carga del icono oficial en Windows, Linux y ejecutables compilados,
+incluso si los archivos en disco se mueven o faltan (mediante fallback embebido).
+"""
+
+import base64
+from pathlib import Path
+import sys
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon, QPixmap
+
+# Icono PNG de alta resolución (128x128 con antialiasing) embebido en Base64
+ICON_PNG_B64 = b"""iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAAACXBIWXMAAA9hAAAPYQGoP6dpAAAamElEQVR4nO2deZAcV33Hv6+PuWdvrbQ6LMm6D0vGljGmYkpgy2WEjzgxOMbYxkcQEMoUlSBInOAoVAghJMZJBUigZFcEOMEkEBvLwYqwUzJYtg7rWq0OZEnWaiWtdmdnd+fu4+WPnpnt4/UxOz07s2Z+VSt19+v33u+9z+/3ju7Xb4CmNKUpTWlKU5rSlKb81gmZspwoJV/qldbEOXo3AV0lEjKfA2bzHIkIUMMgnMgDoKDWqIwj/SllhwK0dI0arrHStuaqu24TSPWpM+6hNvEUUKgqlWQgK6vIKCoZkFX1rKyqvSN5/idbb4wdtFHHd6mtAVBKNh9W7owR+dGoyN0Q4NGRkigUCsgUUFQKRQUkCiimWjSAYYWZ4BuyLf7Dgk8N9zGMzWwrNrZDGQF6DVnw9WUSAPAcgUAAgWjHPCjiIkFexfB4Qd09mle+9/SNbc+DEDv7rFpqYgCf2ktbZwXzW9oF8gnCoTMtA2mFIidr4WxolA2VlkPt49pCM5qAMV2LebhCY6bLgG85onbpWLWkAMI8QUzQ/mSVDo9I6g8ujytPPLehY9SqYXXiqwF89Nc0vCgufb1LxMOSQmMJiUJSS6GmCqcs0CxY1OE+hqdZvNwqlAHf6ND24SyQ3uAbb/Zq0CJH0RXkIHIkdTGnbj1Gxr78+vvnZRnRJiW+GcDmw9n7OzjyTRDSPVygKBTBaxVlhc84rLDZN1adsdk3Bhi9nNHsG45pBcZpvIma7tMf2JfTVA6bugnxBDNCHEDppctp+sVn1rduY6pRoVRtAJ89QmOdKPwoyuP2kTxFRnEuoKU5hCXY0uzrby57PjOO/g5YQTLyNVa4MYLR6FwMx7YlYsPXR6LGU0MC5mSjAkFXiMOYRF/YN5T6g313zMlYFKtAqjKAR36VXz2/FT9XgPlDOYZHOjb7VFe5uv+Z/aMxTafKZiShXbM0184VblsaRrPvfeygv+YC3xrNcGFmmAMBPXtyWL3t5ds6jlg18CaTNoAH38x+YFmM//mYROOjBVNhzNoWTyfCrfBNt078b6oY1oDPtksoHbv2+QxdTJ5vB59VDkNuDkZu7SpM+Rn0MeQKUKA9yKFNJON9SeUjv7i1Y5c5iheZlAHc/3ru9jVt3HP9OTXIHNkz+nyT+oYjb80+o5I9NPvufT5MAPT5WuHr77ToZTZGL/DNKTKafWaTV5SIQHBFhM/vHSp89JcbZ7zASNZRKjaAT7wh3XhVXN1xJkuDsmJUR9+0sdStaKrn1kKwmn1zo8Oa6plTMjf7tvqZmn1zetQUxoTv0EoZymQohMO5dhzggIUtYv7QsHLz/3644zVzEk5SkQE8+Fp+1aI2vD6YV+NZE3z9CcvzzQMsY1w2/HIYw0NtDaN07GWqZ4ZvutHOIFwHfEzjNerjNPhk62vRwnAaFYDuEDfeN5y/4ZU7enoZqTHFswHcf5BG55HC4YxMF45KpsLoTqwewfZ8PXzDkeE+7/N8FnxDNAf4xuSd4DNaMJsWxKjfZOCzaoiRqe68M8ghKHCnDyczq73ODgQvNwFAt5r/gUSwcMQ04NMrawvGtll1avYZ/kMZFcqoC4su5gpnpKsPY4HUG6NbOY1p28MvKc8EzEiDEQx9AoM5FXMiWLg0HvrBPuD3LMkyxFML8Nn9+XvbBfqjd9IMzzfjMjdbLM83wYflPvY832IY5tagwtE+C75Vl2KoLXzKjMM0fE+tkBN8RgRqvXdxi4ChtPLxn314xrOW5E3iagDrX6GhGzrzbw/n0ZOWzR5rtcyJcGtzyWzpzIWAU7Nv7/leX+ywPdbq+Qb4Zv2pKYwJ38UxjJcsCrvDt28V4iLBjBA38MrbY4vOPLQwZ85GL65dwLKW/F8pKnrGJTZ8fQFN6huOnFuDibvd5vnWOBOIjK2BKdxzy8SGr49saKUc4NvqYi0CQz8X+A7GkMyr6AiS2VfNif/lGeDL5qz04tgC3PEaja9qkfrPp5WWnP7ZPsP6XD2flkMtepfvs/USY4ARtDP8UgSW1zkP+BjXXOCzNPY0+HTr482B+nxtpolhgWBejB9785I65+jHulPmLEvi2AJcEcn9WUYmLRmXFzss+Ab1TfCtlefkacY4LPiGaA4VzoKvDzB4vi18u1bI/K9zK8RS2N3z4XCv8TwlqchIXMvyNvzpUeBxdipOBkApiR3MPXQmQ6FSY4b6Spk4tPH8iVCd4saiuM3zWdecZh56fdj5Onm+E3yWr7PTmdxUzwm+2fPt0yrdeyGtYGGL8DAo/XO7RSW2BvDQm/lb5AA3M6eo3jzfUBD9iYvnM+Ab74ClLpge7VDhxny9wddHZrVSxjLZe34pAUvtW/SzM2WDEq6er4+ekilUSmfdtH3g5p3ADrMKgIMBhHny8KisQmF4trFANp5fIXyj7g7wvUz1bDyfOVh0KIcFPrOcVseYOLSBb3YYG09n6uX2aNhUxyN5BWFefAQVGQClRHwrt34oB6iGwZ9RP7cBHyzXHLxJV9nWa8bCunm+E3wCYEkLj4UxHp1BbQw8lKd4e1zByTEF+gVMTvBZ+lQ64GOaI8P5J8pSGXwASOQo5kWx3qxGSZizgHsP5Zf3KLSvb1QxqmiuXJauFXo+C745L4Dt+a7TKx38mEhw34IgPjwngJkhjqE9cCmn4sX+AradymFcNhqitZwm+IZwj/A9TvXY8G1PYIwIrO0UcSJFlu+9c8Zxs0rMFqBdwh0JSTf4M2Xj7Pnsa+WYLvBZnl/dWz2KW3oC2LwqjBbR+bnXzBCHhxeH8Pvzg/j64TT+Z6BgUyYnz2fpZ7ypEviWDBzispwSoBjOqegRye0AvBmAJMurCpRAZuhT1VTPFr41TvlalaP9TUtDeHRxyBLPSVpEgq9dE8P8WBbfOZYtdwvu8G1yYCzmMJSmIs93gm+2BC08J6kIBvnVLNWYBsARbmFBKQKzgW+tcO/zfDMk/TWW4ds5g1uff++CYBn+ZGTT0jASeYofns65wje3QiyF3T0fxnrzsBZg4ogNHwDyKqBQLDSrBtgYgMqReXnV2AVMBn45pq3nO8FneL5LC6KHv7qNxx+vDLOKV5F8aXUEB0ZkHEpIRn0cDJGlsDt8G29m5OfV80uSV1RA5eZZCgcbAyCqGs8rtPi1TpWeXwV8GK7p02F4vi6MAPj8yjA4Hxa9cwT4k5Vh3L9LmugKag3fYQlYpfABICcDhKMt1tLZTgNJNK9qBlANfKOX6C9V4/nO8AHg6g4B69oFBpXJyXWdIq5q57E/IXuEbzqsarTvAb5L2hkAHCERVtnYXQAQyitG+MYCaf84ej4jTk3g61upotzULfrFviw39wSxZ6g8LPbJ8+Fwr31cb54/oZ+iUCiUMvtDdhdAAIXaeH7xyBF+FZ5vKEKF8EvXrusSWcWqSt43Q7R0idXBd/F8swtVBB+WvDgbw7NpAShU1oMOlkGYMqrNgM87fACYFfb/m9dZYa44KLbqala4EvjmuNbzyXu+/lwFW5gGQFWYZgAT/9TK8/2CTwF0BNhP+qqRriBXbhVd4dt4r/mc6fk1gA9oPFnCbgEodM3dxD+O8I1qTBl8GK5p4sfo3ywcAVTKWrdQiefDqOsUwQcAlbLbALtBIFToK7yxPV8g2iYTxlD/RdYlLBBAVg3V7QK/Pp5fOldt+gB2F4BiC9Cg8DmiTfXWd4tY2sIjxBN88tfjmofWij4mmlGOANtubEVOoehLyth5oYC9QwVdM9tY8J08wtYAGhX+8hYejy4JIcITvHpJwksDBZxNqTWHrxdVpXjkV6NYGOOxpkPEp5dFkFkUxrePpXE0KU0b+IDtgyDtn0aDf0tPAPddGcSzp/N4eaCga5IZy7hqJcWMUhLFoeIj4mdPZbBxbghb3hPH1hMZvNRfWondOPDtOkabFUGNCf/u+QF85UAGZ1KKoeBTDX9CP+1cocAL57LoHZGw5Zo4CIDt/dmGhw8AzPlSo8Ff3sLjviuD+OvDWZxJKVjeyuOBK4NY0cpZ4RfTqcWfsdzalVVtAh5ZGsaqVgFvj8t4Yv84HloaxspWwXIvs/BTAd/BM2zXBDYKfI4Ajy4J4dnT+TL8H/6O5mUUYXx81xiOjk58qqyPXwsxw//Jh9q1KeJq4O6dCfQmJWw7mcFnVsTw2O4kqHkC3kDwAZsWwKpL/aZ6V3cIiPAELw8UQAFc1ymU17ERAOs6xXJka27+itmb39ctlp85cAS4vlsEKPDiuRyiIsG1naZH0nWDb18nbANoEPgUwPpuEa9eksoDvj3DUjmOWjzX61ND57cA3H1pYuqnUuCNQW3NgEyBnedzuHl20DbulMO3qRjnLqDO8EGBpS08XhoolO88mlTw8V1jWNcpYs+whL6kMqGrQ0H9FU353qSMu3cmcH23iDcGJfSOSOVW4nBCwoY5xdVIDQofcHoO0ADwBaLtj3c2pRr0OTqqaP2+2fPdy+uDGAvcm9TAT+itBZ4alxERCARCDdPV+sFn14r9NLDO8AHt8a75CZ+1ruoH3wJUV9iURHHPziHm08FGgQ/YtQANAL90X+PAN2dgDx/Fc9Xu3nrAt6kcx/em9Yavb4m8wq+5ERiVsIVve28DwQc8PAeoNXwC4Op2ARtmibh+hoiZIQ7tQVKeXrGe8jH1KOlIgYIyERLgtbT4Cl8Ry6o2ms/KtNyM994101Cnpb/SBZYRlvRXKZAoKBjMKnhzMI9XBrI4OJw32U7t4Ff0KHiq4K9pF7B5VRjXdQq2FThZ4QkQFMikt0IVOK1yAhxByrDruSaV6kgI0Bnk0RnksbwtgAeWxLFvKI9vHUriyEgB9YAPOHQBtYQPUDx4ZQg/vjGuwfdZCKqDrxeOADGRgOgS86ubuaYriGc+2I17F0dBag3fRmmHMUDtPP+x5WE8fpU/6/ZZIvL+wC8JR7QtWQH/4E+kTfDFtR3YtKq1eGXq4AMVDQKL16qE/5E5AXxu2eQ/1/Iilfb3XkQg/sPXyx+uaMWtc8M1hF/BGKB8u8/w4yLBljXM7xN8FbeWZTAtYygrIStrHXtY4NAVFtEdte+OBP/XmVrkS9d04LVLOaQKxQV5NYYPeBoEFq/5MNV7dHEIrYGp+6Eys8gqcCKRRf9YHpfTMjJFA4gIHGZEBcxtCWJpR3hKYLOkNcDjgSVxfLs36S98h6bLdkWQ3/AB4K55AXtNpkBOJLI4MZzF+ZSEtDyxkFQsKEgWFGSKQ/2VXdV/VDpZuW1BDN85ktTVZe3gA47vAorHPj3kWdnCoyfC1bYjNSuqk8G0jP6xPM6nJCQlYFgiOJ7WwpZFgU5KgZSEiOjeHdRSZoYFLGkL4ESy4CP8CruAcjQfn/AtbuGdsvJHHIxrKCvhclpGWtbg/8cFIFX81O/AGHBPD4FIKC4Xxwf1MgAAWNQi4ngyX3P4gNNzAJ8f73bb7Mvjm7i0LFlZRUZWIVHgeFqD/+P1bfjx+jakZO2aRIGMrJYHh/WSzjDvP3yb+mGvCazZs/0aSc0zmGKpAXy7KnJZEFI89gH+YE6xy6o68Qg/LHCICBzEgoJlUa3Z/9irSQBATNDGASLRZgThek0DijKUU+A/fHZFuXZ0fr3VOzlWAwOowPO7wiJmRAUkCwo6KcU9PaZBoEgRFYAZUQFdYf8/L69ETo3ltQM/4dvUlcsgUJ/W5OFTChxNKhjIqJgd9sm7Kmz2u4vz/IykAikJIqEordkUifabO3NiIua2BOs6ALyYkXBypDAl8AGnLsBH+IC2gPO/3snjc8t8mGNPss9f2qHlHRE5xwdB9ZQXz6R0de8n/Aq6gFot5vjeiRw+sTCEtmqeBlYx4BM47SFPV1is+FHwVMhoQcG/HS/9QHjt4QNuXYCP8EGBUYniLw6k8U/vjTll66SQJ1Gp8/uA7qhQMeypmBn+zZ4hjBfKH+bXHD7guB7AX/ilGM/35/FU3yR+/bwCz1cquNeryDVIUy/f6x3BL86lUTP4NvrbPAquDfxSnCePZpDIq/jK2qhhoYWtVFj5kkIhcP6tCVApkKmRBSiU4ptvDePfT4yhtvDZ+rusCPIfPqANCJ8+lcOdr47ijSHJTgVLObwKBZDX/cJZNaJSbYl3LfYe2DeYwwM7BvDsiTEL7KmAD7i8DKoFfH3aB4cl3PPqKK7uFHHr7ADe3yViZphDZ4jT+vAqKl2hQEaivi4KrUZUSpHIKxjMKHhjMItfnsvg0FBOX6tTDh/w/HWw//BLkVQA+4cl7NO1BOYuaCJAn6vxXB/h4r095avmxZyVSlBnOfN/+I4hL4M2BmWpiQMDkM15TeA72ICHr4NrB798jVFZk4Vfe5l+8J2qxuXr4PrD17qCSuDX0hIqg08MS33rCd++Tpyngdb0JkKnAL5AgGc/0IqYSCxpmDK1OfdZKoAfEwmeu6UHgn4wU0/4NvVis0VM/eED2j58OYViYYw3pKHflkWfij7fWv2Z81rVEcCjK+JY1R7QhVJc2SIiI6uQWb+6ZfivfvCBiraIKao7RfBLN/UlZazpEMs/2GC3LYuHsvokRvg/vXUmOEKgUoq7XrqIIwltJc/azgCOjRRMStUTPrtm7DeJagD4ALDzQgEfmhUoT+PstmUx51cbMSp7w8wguOKTLI4QXD8zCFBtynnT3Ah29GcaGj7gaYuYorp1gE8B7B0qICNTbJwbAmC/LUvt4cOkLMXrF3PlXdVVSrH7orY/4G0LokjLKvZeyhkj1hO+TdV4WBFU36meCuDbx9LY8p44ekckx21ZGMrXSDTlexMF3PXSRVw/M4jdF3PoTRSwqFXAg8vjeHz3cNFQGwU+u1JcloU3xjz/aFLC0ycy2HJNHE/sH7fdlsWqfy3EqPyRRB5HhrUVPItaBXz1vZ34fu8Y+hIFmCun0eADjq+DGwN+KcL24varf3tdHNtOZvDiuZz2hs5xcwa/hZo4aOc80Zr9B5fH8f3eMWw/W+u3ev7ABzysCGoE+CXZ3p/FmXEJn1kRw+8uCGPn+RwOJyScGpeRkmiN4cOgS0wkuLIlgLWdAdw0N4K0rOLx3cMN6/l2VeO4IqiR4JfOjyZlPLY7iWs7Rdw8O4gNc0KICETbkIldRt+FEIpnPjQLGVnFsZEC/vlIEnsv5Rq2z6cOLYH7ILCB4JfupSrFnssF7LmszbMFQo27cdVQKCioCtzz8sUGe8hTOXzAbVl4A8Jn9fnmffhqZQL6FzvvBviAy9vA6QCfda8f7+/NolLYVLj1fLrABzzsETTd4FMAwzX4CmkoW0pzGsJ3MAaH3wuYnvABigtZ/w3gYkaGpTKmOXzAxgBkVZ228AHgVxdy8Ft2XcjoM4K5chodvt3KKHYXQJAtfbsx3eCDAtvPZUGLV/z62342PW3hB3gCqJS5Ft+mBUBa5Mi0hA8A+y7ntBczPtH/9YUs9jXcix1v8AEgQAhklabAEKYBKCrGRE6f1vSBD2iPsL+6P+nLbEChwFf3DDPzmg7wQYEAD8gUY6zyMQ1ABc6WW4BpBr90/NZQHk/sTbCKV5F8ZfdlvHU5Z8lrusAHKAI8BwKcZZWPaQAcyG9ErpzDtINfOt/aN4YnDyUt5fMqf38gga19o5a8phN8iuIYAPQUq4zsQSBHjxq6gHKGpWuNDx9U++bgGweS+MyuQSRy2szGy18ip2DTKxfxd/sTFtjTDT4AbWEqJUfAEKYBXMhxL3YFuWkNX6/Nz95O430/PYenDiUxkJHNmpdlIC3jWwdHcP1PzuK/T6cseU1H+KBAd4THhbS8nVVm9gdTlJL1vxg5fzql9IwW9FU5/eCbwwkFVnYEsLQtgO7iblyDWRnHkwUcTej37393wG8LcljQFhjY++DKOWAI+2UQITS/PbGjPcA9MFpQUE52msMvXepNFMqrdw2JvsvgAxQdYQF5BTtgI7bvArKK8nRHoPRBxrsD/sQZA9C7ED4AdIYFpArYChuxNYADt3X9HwjpD/KmMhm10uXXhN9o8KMiB0rRf3rTil2wEfvXwYTQtKL+6xURTp+dXitdfk34jQYfAObFA8jk1e9qHymyxXHPtjND0j9EBW4kKuh/L6UJ35pF48GPizyiIhk51J95Eg7iaACXHpiVHsopTy2I8XqtdPk14TcifFBgQauIoYz8JLasy8BBXHdtPBJMfl3gyNk2caIVaMJvbPgdIR4cx505JYW/ARdx37Zz45J8qqA8NjfK6fJrwm9U+ADFvFYRqULh83hsSR4u4mnf1rfunPF8VqHbFsb5JnyX8HrDX9weRKZAtx3/1Nrn4UE8b9z7Vi63SeTQN6u8128TfqPBnx0TIXCkr+/85U/Bo3jfuflj87Inh9XbZ4b5kRbRmH8TvjHtesBvC/LojgiJk4nc7djyQc9r4iraunv0kzNPHU4WNqxoEbITPwDShF9v+BGBw/LOUObg5eyG/OZ1zNe+dlLx3u2j983et3tY3rimQ8y2iMRUtib8enj+mu5wZveF8Y3S5nX7UaFMejfV1mcGrr2qU9gxmFPbBzJKE75r3v7Dnx0T0R0REgcvZzdMBj5QhQEAQOsz7yxa0hZ6oaCoK94e171nb8I3nfsPf3F7EALHHT2ZyN5RabOvl6p+vmP0k1ec2juSvoaAbruqXURbgGvCt5z7C78jxGNtdwQEZNuRc4PXVgMfqLIF0Mua/7x4R0zAUwrFgjMpGWlJbcL3EX5c5LGgVQTHcWfSucJjxz699gX4IP7+kO8/ngyu6olt7gjhC+kC2vtTMtIKRRO+Q1q6cxb8qMhhXjyAqEhGhjLyk6ek8De8POHzKrX5Jed/OR9ZN4N8ISLynwZV5yZyKhJ5FaOMX8VuwjdoClBtGVdHWEBnWACl6M/k1e8e6s+4vtiZjNT2p7wpJcufu/iBME8fjvDk5iCP2UNZFQWVoqBQFFQVBQXF42JL8VsCP8ATBAhBgAcCPIcATyASghlRHllZHcgr2JEqYOvpTSt2Ob3Pr1am9Lfc5247t/iKKL8RHFaD0kWgdD5PuBaBQ4yChkXDz4cw4JulEvgsqQS+p7wd4OvulVQAKs3KKk3JFGPaRxv0FFTaeyGjvtj/R6t/w860KU1pSlOa0pSmNKUpTfFB/h8QdtatsFAC6AAAAABJRU5ErkJggg=="""
+
+
+def setup_windows_app_id():
+    """Configura el identificador explícito de proceso en Windows (AppUserModelID).
+    
+    Sin esto, Windows agrupa la app bajo 'python.exe' y muestra el icono genérico
+    de Python en la barra de tareas y el menú de ventana en vez del icono propio.
+    """
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            app_id = "SoftwarePapa.RepartoPersonal.Planificador.1.0"
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+        except Exception:
+            pass
+
+
+def get_app_pixmap(size: int = 48) -> QPixmap:
+    """Devuelve el QPixmap del icono oficial, garantizando que siempre esté disponible."""
+    # 1. Intentar cargar desde el sistema de archivos
+    candidate_paths = [
+        Path(__file__).resolve().parent / "assets" / f"icono_{size}.png",
+        Path(__file__).resolve().parent / "assets" / "icono.png",
+    ]
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        candidate_paths.extend([
+            exe_dir / "reparto" / "assets" / "icono.png",
+            exe_dir / "_internal" / "reparto" / "assets" / "icono.png",
+        ])
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidate_paths.append(Path(meipass) / "reparto" / "assets" / "icono.png")
+
+    for p in candidate_paths:
+        if p.exists():
+            pix = QPixmap(str(p))
+            if not pix.isNull():
+                return pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    # 2. Fallback infalible: decodificar desde memoria base64
+    pix = QPixmap()
+    pix.loadFromData(base64.b64decode(ICON_PNG_B64), "PNG")
+    if not pix.isNull():
+        return pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    return QPixmap()
+
+
+def get_app_icon() -> QIcon:
+    """Devuelve el QIcon oficial para ventanas y barra de tareas."""
+    pix = get_app_pixmap(128)
+    if not pix.isNull():
+        return QIcon(pix)
+    return QIcon()
