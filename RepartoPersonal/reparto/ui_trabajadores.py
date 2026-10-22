@@ -14,6 +14,7 @@ from PySide6.QtCore import (
     QPropertyAnimation,
     QRectF,
     Qt,
+    QTimer,
     Property,
     Signal,
 )
@@ -329,6 +330,10 @@ class TrabajadoresTab(QWidget):
         self.notification_lbl.setObjectName("notificationLabel")
         self.notification_lbl.setVisible(False)
         main_layout.addWidget(self.notification_lbl)
+
+        self._notification_timer = QTimer(self)
+        self._notification_timer.setSingleShot(True)
+        self._notification_timer.timeout.connect(lambda: self.notification_lbl.setVisible(False))
 
         # 2. Panel Maestro-Detalle (Splitter)
         splitter = QSplitter(Qt.Horizontal)
@@ -648,6 +653,7 @@ class TrabajadoresTab(QWidget):
             save_editable_workers(self.pref_path, self.workers)
             self.notification_lbl.setText("✔ Cambios guardados correctamente en Plantilla_Conocimientos_y_Preferencias.xlsx")
             self.notification_lbl.setVisible(True)
+            self._notification_timer.start(4000)
             self.data_saved.emit()
         except Exception as e:
             QMessageBox.critical(self, "Error al guardar", f"No se pudo guardar el archivo: {str(e)}")
