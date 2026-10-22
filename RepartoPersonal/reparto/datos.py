@@ -263,7 +263,7 @@ def load_sequences(xlsx_path: str | Path, warnings: list[str] | None = None) -> 
     _, cells = _parse_xlsx_cells(data, sheet_name_contains="secuencia")
 
     sequences = {}
-    max_row = max(r for r, c in cells)
+    max_row = max((r for r, c in cells), default=0)
 
     for r in range(max_row + 1):
         name_val = cells.get((r, 1))  # Col B
@@ -311,8 +311,8 @@ def load_skills_and_preferences(xlsx_path: str | Path) -> dict[str, dict]:
     _, cells = _parse_xlsx_cells(data, sheet_name_contains="Trabajadores")
 
     profiles = {}
-    max_row = max(r for r, c in cells)
-    max_col = max(c for r, c in cells)
+    max_row = max((r for r, c in cells), default=0)
+    max_col = max((c for r, c in cells), default=0)
 
     # Identificar columnas en la fila de cabecera (fila 3 de Excel, índice 2)
     baja_col = next((c for c in range(max_col + 1) if "BAJA" in str(cells.get((2, c)) or "").upper()), None)
@@ -466,18 +466,35 @@ def valid_cycle_days(year: int, month: int) -> list[int]:
     return [d for d in range(1, CYCLE_LENGTH + 1) if (d - 1) % 7 == weekday]
 
 
-def suggest_cycle_day(reference: date, reference_cycle_day: int, year: int, month: int) -> int:
-    """Día de ciclo del día 1 del mes pedido, a partir de una fecha de referencia conocida."""
-    offset = (date(year, month, 1) - reference).days
-    return (reference_cycle_day - 1 + offset) % CYCLE_LENGTH + 1
+DEFAULT_REFERENCE_DATE = date(2026, 11, 1)
+DEFAULT_REFERENCE_CYCLE_DAY = 63
 
 
-def month_warnings(year: int, month: int) -> list[str]:
-    """Avisos del calendario del mes (p. ej. festivos no verificados)."""
-    _, verified = holidays_for_year(year)
-    if verified:
-        return []
-    return [f"Los festivos de {year} están calculados por regla y no verificados: revíselos."]
+def suggest_cycle_day(
+    reference_or_year: date | int = DEFAULT_REFERENCE_DATE,
+    reference_cycle_day_or_month: int = DEFAULT_REFERENCE_CYCLE_DAY,
+    year: int | None = None,
+    month: int | None = None,
+) -> int:
+    """Día de ciclo del día 1 del mes pedido.
+
+    Admite dos formas de llamada:
+    - suggest_cycle_day(year, month): usa la referencia oficial por defecto (1-nov-2026 = día 63).
+    - suggest_cycle_day(reference, reference_cycle_day, year, month): calcula desde una referencia específica.
+    """
+    if isinstance(reference_or_year, date):
+        ref_date = reference_or_year
+        ref_cycle = reference_cycle_day_or_month
+        target_year = year if year is not None else ref_date.year
+        target_month = month if month is not None else ref_date.month
+    else:
+        ref_date = DEFAULT_REFERENCE_DATE
+        ref_cycle = DEFAULT_REFERENCE_CYCLE_DAY
+        target_year = int(reference_or_year)
+        target_month = int(reference_cycle_day_or_month)
+
+    offset = (date(target_year, target_month, 1) - ref_date).days
+    return (ref_cycle - 1 + offset) % CYCLE_LENGTH + 1
 
 
 def project_month(

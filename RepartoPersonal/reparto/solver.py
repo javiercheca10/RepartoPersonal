@@ -112,6 +112,10 @@ def solve_month(
     # Conteos de cobertura por (day, shift, pos): lista de variables bool
     coverage_choices = defaultdict(list)
 
+    # Índices optimizados para cálculo de esfuerzo y restricciones consecutivas O(1)
+    worker_assigned_terms = defaultdict(list)
+    worker_day_pos_vars = defaultdict(list)
+
     for s in workdays:
         d = s.day
 
@@ -124,6 +128,8 @@ def solve_month(
                     x[d, "M", wid, pos] = var
                     worker_shift_choices[d, "M", wid].append(var)
                     coverage_choices[d, "M", pos].append(var)
+                    worker_assigned_terms[wid].append((var, pos))
+                    worker_day_pos_vars[wid, d, pos].append(var)
             # Opción Libre (.)
             var_free = model.new_bool_var(f"x_{d}_M_{wid}_FREE")
             x[d, "M", wid, "."] = var_free
@@ -139,6 +145,8 @@ def solve_month(
                     x[d, "T", wid, pos] = var
                     worker_shift_choices[d, "T", wid].append(var)
                     coverage_choices[d, "T", pos].append(var)
+                    worker_assigned_terms[wid].append((var, pos))
+                    worker_day_pos_vars[wid, d, pos].append(var)
             # Opción Libre (.)
             var_free = model.new_bool_var(f"x_{d}_T_{wid}_FREE")
             x[d, "T", wid, "."] = var_free
@@ -159,6 +167,8 @@ def solve_month(
                     x[d, "M", wid, pos] = var
                     m_choices.append(var)
                     coverage_choices[d, "M", pos].append(var)
+                    worker_assigned_terms[wid].append((var, pos))
+                    worker_day_pos_vars[wid, d, pos].append(var)
             var_free_m = model.new_bool_var(f"x_{d}_M_{wid}_FREE")
             x[d, "M", wid, "."] = var_free_m
             m_choices.append(var_free_m)
@@ -171,6 +181,8 @@ def solve_month(
                     x[d, "T", wid, pos] = var
                     t_choices.append(var)
                     coverage_choices[d, "T", pos].append(var)
+                    worker_assigned_terms[wid].append((var, pos))
+                    worker_day_pos_vars[wid, d, pos].append(var)
             var_free_t = model.new_bool_var(f"x_{d}_T_{wid}_FREE")
             x[d, "T", wid, "."] = var_free_t
             t_choices.append(var_free_t)
@@ -241,12 +253,8 @@ def solve_month(
         if d_cnt > 0:
             pts_var = model.new_int_var(0, 16 * d_cnt, f"pts_{w.id}")
             terms = [
-                x[d, shift, w.id, pos] * w.ranking.get(pos, 8)
-                for s in workdays
-                for d in (s.day,)
-                for shift in ("M", "T")
-                for pos in POSITIONS
-                if (d, shift, w.id, pos) in x
+                var * w.ranking.get(pos, 8)
+                for var, pos in worker_assigned_terms[w.id]
             ]
             model.add(pts_var == sum(terms))
             worker_pts[w.id] = pts_var
@@ -270,19 +278,23 @@ def solve_month(
 
     # Penalización suave: evitar más de 2 días consecutivos en el mismo puesto (si es posible)
     consec_penalty_vars = []
+    valid_worker_skills = {w.id: w.skills - w.vetoes for w in workers if len(w.skills - w.vetoes) > 1}
     for i in range(len(workdays) - 2):
         d1, d2, d3 = workdays[i].day, workdays[i + 1].day, workdays[i + 2].day
-        for w in workers:
-            if len(w.skills - w.vetoes) <= 1:
-                continue
-            for pos in POSITIONS:
-                vars_d1 = [x[d1, sh, w.id, pos] for sh in ("M", "T") if (d1, sh, w.id, pos) in x]
-                vars_d2 = [x[d2, sh, w.id, pos] for sh in ("M", "T") if (d2, sh, w.id, pos) in x]
-                vars_d3 = [x[d3, sh, w.id, pos] for sh in ("M", "T") if (d3, sh, w.id, pos) in x]
-                if vars_d1 and vars_d2 and vars_d3:
-                    viol = model.new_bool_var(f"consec_{w.id}_{pos}_{d1}")
-                    model.add(viol >= sum(vars_d1) + sum(vars_d2) + sum(vars_d3) - 2)
-                    consec_penalty_vars.append(viol)
+        for wid, skills in valid_worker_skills.items():
+            for pos in skills:
+                v1 = worker_day_pos_vars.get((wid, d1, pos))
+                if not v1:
+                    continue
+                v2 = worker_day_pos_vars.get((wid, d2, pos))
+                if not v2:
+                    continue
+                v3 = worker_day_pos_vars.get((wid, d3, pos))
+                if not v3:
+                    continue
+                viol = model.new_bool_var(f"consec_{wid}_{pos}_{d1}")
+                model.add(viol >= sum(v1) + sum(v2) + sum(v3) - 2)
+                consec_penalty_vars.append(viol)
 
     total_consec_penalty = sum(consec_penalty_vars) if consec_penalty_vars else 0
 

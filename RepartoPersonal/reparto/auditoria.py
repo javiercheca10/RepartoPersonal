@@ -69,7 +69,6 @@ def audit_assignments(
     day_info = {s.day: s for s in schedules}
 
     per_worker_day = Counter()
-    worker_shifts: dict[tuple[str, date], set[str]] = {}
     pos_counts = Counter()
 
     for a in assignments:
@@ -81,7 +80,6 @@ def audit_assignments(
         if not s.is_workday:
             issues.append(f"AUDITORÍA: {w.name} asignado en día no laborable {a.day}")
         per_worker_day[(a.worker_id, a.day)] += 1
-        worker_shifts.setdefault((a.worker_id, a.day), set()).add(a.shift)
 
         mark = w.sequence[s.cycle_day - 1]
         if mark == "M" and a.shift != "M" or mark == "T" and a.shift != "T" or mark not in ("M", "T", "R"):

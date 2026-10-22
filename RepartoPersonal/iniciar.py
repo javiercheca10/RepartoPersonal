@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -44,6 +45,7 @@ from reparto.datos import (
 )
 from reparto.exportadores import export_month_to_excel, export_month_to_pdf
 from reparto.solver import MonthResult, solve_month
+from reparto.ui_trabajadores import TrabajadoresTab
 
 MONTHS_ES = [
     ("Enero", 1), ("Febrero", 2), ("Marzo", 3), ("Abril", 4),
@@ -118,9 +120,9 @@ class SolverWorkerThread(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RepartoPersonal — Planificación y Asignación de Puestos")
-        self.resize(760, 680)
-        self.setMinimumSize(700, 600)
+        self.setWindowTitle("Planificación de Puestos — Servicio de Radiodiagnóstico")
+        self.resize(880, 750)
+        self.setMinimumSize(820, 680)
 
         self.config_dir = APP_DIR / "configuracion"
         if not self.config_dir.exists() and (APP_DIR / "configuracion_ejemplo").exists():
@@ -145,71 +147,111 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(28, 24, 28, 24)
-        main_layout.setSpacing(18)
+        main_layout.setContentsMargins(28, 20, 28, 20)
+        main_layout.setSpacing(14)
 
-        # 1. Cabecera
+        # 1. Cabecera Común
         header_box = QVBoxLayout()
-        header_box.setSpacing(4)
-        title_lbl = QLabel("Generador de Cuadrantes Mensuales")
+        header_box.setSpacing(3)
+        title_lbl = QLabel("Planificación de Puestos de Trabajo")
         title_lbl.setObjectName("titleLabel")
-        subtitle_lbl = QLabel("Sistema de Optimización y Reparto Equitativo de Puestos de Trabajo")
+        subtitle_lbl = QLabel("Servicio de Radiodiagnóstico · Gestión mensual de turnos y cuadrantes")
         subtitle_lbl.setObjectName("subtitleLabel")
         header_box.addWidget(title_lbl)
         header_box.addWidget(subtitle_lbl)
         main_layout.addLayout(header_box)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setObjectName("separator")
-        main_layout.addWidget(sep)
+        # 2. Selector de Pestañas
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setObjectName("mainTabWidget")
 
-        # 2. Tarjeta: Archivos de Configuración
+        # --- PESTAÑA 1: PLANIFICACIÓN Y CUADRANTE ---
+        plan_tab = QWidget()
+        plan_layout = QVBoxLayout(plan_tab)
+        plan_layout.setContentsMargins(0, 14, 0, 0)
+        plan_layout.setSpacing(16)
+
+        # Tarjeta: Archivos de Configuración
         config_card = QFrame()
         config_card.setObjectName("card")
         config_card_layout = QVBoxLayout(config_card)
         config_card_layout.setSpacing(12)
 
-        card1_title = QLabel("1. Archivos de Configuración")
+        card1_header = QHBoxLayout()
+        card1_title = QLabel("Archivos de Configuración")
         card1_title.setObjectName("cardTitle")
-        config_card_layout.addWidget(card1_title)
+        card1_header.addWidget(card1_title)
+        card1_header.addStretch()
 
+        self.open_config_btn = QPushButton("Abrir carpeta de datos")
+        self.open_config_btn.setObjectName("actionSecondaryBtn")
+        self.open_config_btn.setToolTip("Abre la carpeta donde se encuentran las plantillas de turnos y conocimientos para editarlas.")
+        self.open_config_btn.clicked.connect(self._open_config_folder)
+        card1_header.addWidget(self.open_config_btn)
+
+        config_card_layout.addLayout(card1_header)
+
+        # Fila 1: Secuencias
         seq_row = QHBoxLayout()
-        self.seq_status_lbl = QLabel("● Secuencias de Turnos:")
-        self.seq_status_lbl.setObjectName("statusLabel")
+        seq_name_box = QVBoxLayout()
+        seq_name_box.setSpacing(2)
+        seq_title = QLabel("Secuencias de Turnos (Ciclo de 24 semanas)")
+        seq_title.setObjectName("itemTitle")
         self.seq_path_lbl = QLabel(self.seq_path.name)
         self.seq_path_lbl.setObjectName("pathLabel")
+        seq_name_box.addWidget(seq_title)
+        seq_name_box.addWidget(self.seq_path_lbl)
+
+        self.seq_status_lbl = QLabel("Comprobando...")
+        self.seq_status_lbl.setObjectName("badgeOk")
+        self.seq_status_lbl.setAlignment(Qt.AlignCenter)
+
+        seq_row.addLayout(seq_name_box, 1)
         seq_row.addWidget(self.seq_status_lbl)
-        seq_row.addWidget(self.seq_path_lbl, 1)
         config_card_layout.addLayout(seq_row)
 
+        item_sep = QFrame()
+        item_sep.setFrameShape(QFrame.HLine)
+        item_sep.setObjectName("itemSeparator")
+        config_card_layout.addWidget(item_sep)
+
+        # Fila 2: Conocimientos y Preferencias
         pref_row = QHBoxLayout()
-        self.pref_status_lbl = QLabel("● Ficha de Conocimientos:")
-        self.pref_status_lbl.setObjectName("statusLabel")
+        pref_name_box = QVBoxLayout()
+        pref_name_box.setSpacing(2)
+        pref_title = QLabel("Ficha de Competencias y Preferencias")
+        pref_title.setObjectName("itemTitle")
         self.pref_path_lbl = QLabel(self.pref_path.name)
         self.pref_path_lbl.setObjectName("pathLabel")
+        pref_name_box.addWidget(pref_title)
+        pref_name_box.addWidget(self.pref_path_lbl)
+
+        self.pref_status_lbl = QLabel("Comprobando...")
+        self.pref_status_lbl.setObjectName("badgeOk")
+        self.pref_status_lbl.setAlignment(Qt.AlignCenter)
+
+        pref_row.addLayout(pref_name_box, 1)
         pref_row.addWidget(self.pref_status_lbl)
-        pref_row.addWidget(self.pref_path_lbl, 1)
         config_card_layout.addLayout(pref_row)
 
-        main_layout.addWidget(config_card)
+        plan_layout.addWidget(config_card)
 
-        # 3. Tarjeta: Período
+        # Tarjeta: Período a Planificar
         params_card = QFrame()
         params_card.setObjectName("card")
         params_card_layout = QVBoxLayout(params_card)
         params_card_layout.setSpacing(14)
 
-        card2_title = QLabel("2. Período a Planificar")
+        card2_title = QLabel("Período a Planificar")
         card2_title.setObjectName("cardTitle")
         params_card_layout.addWidget(card2_title)
 
         form_layout = QHBoxLayout()
-        form_layout.setSpacing(20)
+        form_layout.setSpacing(16)
 
         mes_box = QVBoxLayout()
-        mes_box.setSpacing(4)
-        mes_lbl = QLabel("Mes:")
+        mes_box.setSpacing(6)
+        mes_lbl = QLabel("Mes")
         mes_lbl.setObjectName("fieldLabel")
         self.month_combo = QComboBox()
         for name, num in MONTHS_ES:
@@ -221,8 +263,8 @@ class MainWindow(QMainWindow):
         form_layout.addLayout(mes_box)
 
         year_box = QVBoxLayout()
-        year_box.setSpacing(4)
-        year_lbl = QLabel("Año:")
+        year_box.setSpacing(6)
+        year_lbl = QLabel("Año")
         year_lbl.setObjectName("fieldLabel")
         self.year_combo = QComboBox()
         for y in range(2026, 2031):
@@ -233,8 +275,8 @@ class MainWindow(QMainWindow):
         form_layout.addLayout(year_box)
 
         cycle_box = QVBoxLayout()
-        cycle_box.setSpacing(4)
-        cycle_lbl = QLabel("Día del Ciclo en Día 1 (1 a 168):")
+        cycle_box.setSpacing(6)
+        cycle_lbl = QLabel("Día del Ciclo en Día 1 (1 a 168)")
         cycle_lbl.setObjectName("fieldLabel")
         self.cycle_combo = QComboBox()
         self.cycle_combo.setEditable(True)
@@ -247,47 +289,48 @@ class MainWindow(QMainWindow):
         form_layout.addLayout(cycle_box)
 
         time_box = QVBoxLayout()
-        time_box.setSpacing(4)
-        time_lbl = QLabel("Tiempo Máx. Cómputo (seg):")
+        time_box.setSpacing(6)
+        time_lbl = QLabel("Tiempo Máx. Cómputo")
         time_lbl.setObjectName("fieldLabel")
         self.time_spin = QSpinBox()
         self.time_spin.setRange(5, 300)
         self.time_spin.setValue(15)
         self.time_spin.setSingleStep(5)
         self.time_spin.setSuffix(" s")
-        self.time_spin.setToolTip("Tiempo máximo de cálculo para el solver (segundos). Valores más altos permiten mayor equidad.")
+        self.time_spin.setToolTip("Tiempo máximo de cálculo para el optimizador (segundos). Valores más altos permiten mayor equidad.")
         time_box.addWidget(time_lbl)
         time_box.addWidget(self.time_spin)
         form_layout.addLayout(time_box)
 
         params_card_layout.addLayout(form_layout)
-        main_layout.addWidget(params_card)
+        plan_layout.addWidget(params_card)
 
-        # 4. Botón Acción
-        self.generate_btn = QPushButton("Generar Cuadrante Mensual")
+        # Botón Acción
+        self.generate_btn = QPushButton("Generar Cuadrante")
         self.generate_btn.setObjectName("generateButton")
         self.generate_btn.clicked.connect(self._on_generate_clicked)
-        main_layout.addWidget(self.generate_btn)
+        plan_layout.addWidget(self.generate_btn)
 
-        # 5. Progreso y Estado
+        # Progreso y Estado
         self.progress_bar = QProgressBar()
         self.progress_bar.setObjectName("progressBar")
+        self.progress_bar.setTextVisible(False)
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(False)
-        main_layout.addWidget(self.progress_bar)
+        plan_layout.addWidget(self.progress_bar)
 
         self.status_lbl = QLabel("Listo para generar.")
         self.status_lbl.setObjectName("infoLabel")
         self.status_lbl.setAlignment(Qt.AlignCenter)
-        main_layout.addWidget(self.status_lbl)
+        plan_layout.addWidget(self.status_lbl)
 
-        # 6. Tarjeta Resultados
+        # Tarjeta Resultados
         self.results_card = QFrame()
         self.results_card.setObjectName("resultsCard")
         results_layout = QVBoxLayout(self.results_card)
-        results_layout.setSpacing(10)
+        results_layout.setSpacing(12)
 
-        self.results_title = QLabel("¡Cuadrante Generado Correctamente!")
+        self.results_title = QLabel("Cuadrante generado correctamente")
         self.results_title.setObjectName("resultsTitle")
         self.results_info = QLabel("")
         self.results_info.setObjectName("resultsInfo")
@@ -295,16 +338,16 @@ class MainWindow(QMainWindow):
         buttons_layout = QHBoxLayout()
         buttons_layout.setSpacing(12)
 
-        self.open_excel_btn = QPushButton("📊 Abrir Cuadrante Excel")
-        self.open_excel_btn.setObjectName("actionBtn")
+        self.open_excel_btn = QPushButton("Abrir Cuadrante Excel")
+        self.open_excel_btn.setObjectName("actionPrimaryBtn")
         self.open_excel_btn.clicked.connect(self._open_excel)
 
-        self.open_pdf_btn = QPushButton("📑 Abrir Cuadrante PDF")
-        self.open_pdf_btn.setObjectName("actionBtn")
+        self.open_pdf_btn = QPushButton("Abrir Cuadrante PDF")
+        self.open_pdf_btn.setObjectName("actionResultBtn")
         self.open_pdf_btn.clicked.connect(self._open_pdf)
 
-        self.open_folder_btn = QPushButton("📁 Abrir Carpeta Resultados")
-        self.open_folder_btn.setObjectName("actionSecondaryBtn")
+        self.open_folder_btn = QPushButton("Abrir Carpeta de Salida")
+        self.open_folder_btn.setObjectName("actionResultBtn")
         self.open_folder_btn.clicked.connect(self._open_folder)
 
         buttons_layout.addWidget(self.open_excel_btn)
@@ -316,74 +359,265 @@ class MainWindow(QMainWindow):
         results_layout.addLayout(buttons_layout)
 
         self.results_card.setVisible(False)
-        main_layout.addWidget(self.results_card)
+        plan_layout.addWidget(self.results_card)
+        plan_layout.addStretch()
 
-        main_layout.addStretch()
+        self.tab_widget.addTab(plan_tab, "Planificación y Cuadrante")
+
+        # --- PESTAÑA 2: TRABAJADORES ---
+        self.tab_trabajadores = TrabajadoresTab(self.pref_path)
+        self.tab_trabajadores.data_saved.connect(self._on_worker_data_saved)
+        self.tab_widget.addTab(self.tab_trabajadores, "Trabajadores")
+
+        main_layout.addWidget(self.tab_widget, 1)
 
     def _apply_styles(self):
         self.setStyleSheet("""
-            QMainWindow { background-color: #F8FAFC; }
-            #titleLabel { font-size: 20px; font-weight: bold; color: #0F172A; }
-            #subtitleLabel { font-size: 13px; color: #475569; }
-            #separator { color: #E2E8F0; height: 1px; }
-            #card { background-color: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 10px; padding: 14px; }
-            #cardTitle { font-size: 14px; font-weight: bold; color: #1E3A8A; }
-            #fieldLabel { font-size: 12px; font-weight: 600; color: #334155; }
-            #statusLabel { font-size: 13px; font-weight: 600; color: #059669; }
-            #pathLabel { font-size: 13px; color: #64748B; }
+            QMainWindow {
+                background-color: #F8FAFC;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            }
+            QTabWidget::pane {
+                border: none;
+                background-color: transparent;
+            }
+            QTabBar::tab {
+                background-color: transparent;
+                color: #64748B;
+                font-size: 13px;
+                font-weight: 600;
+                padding: 8px 16px;
+                margin-right: 6px;
+                border-bottom: 2px solid transparent;
+            }
+            QTabBar::tab:hover {
+                color: #0F172A;
+            }
+            QTabBar::tab:selected {
+                color: #2563EB;
+                border-bottom: 2px solid #2563EB;
+            }
+            #titleLabel {
+                font-size: 20px;
+                font-weight: 700;
+                color: #0F172A;
+                letter-spacing: -0.3px;
+            }
+            #subtitleLabel {
+                font-size: 13px;
+                color: #64748B;
+            }
+            #separator {
+                color: #E2E8F0;
+                background-color: #E2E8F0;
+                height: 1px;
+                border: none;
+            }
+            #card {
+                background-color: #FFFFFF;
+                border: 1px solid #E2E8F0;
+                border-radius: 8px;
+                padding: 16px 20px;
+            }
+            #cardTitle {
+                font-size: 14px;
+                font-weight: 600;
+                color: #0F172A;
+                letter-spacing: -0.1px;
+            }
+            #itemTitle {
+                font-size: 13px;
+                font-weight: 500;
+                color: #1E293B;
+            }
+            #pathLabel {
+                font-size: 12px;
+                color: #64748B;
+            }
+            #itemSeparator {
+                color: #F1F5F9;
+                background-color: #F1F5F9;
+                height: 1px;
+                border: none;
+            }
+            #fieldLabel {
+                font-size: 12px;
+                font-weight: 600;
+                color: #475569;
+            }
             QComboBox, QSpinBox {
-                background-color: #FFFFFF; border: 1px solid #CBD5E1;
-                border-radius: 6px; padding: 6px 10px; font-size: 13px; color: #0F172A;
+                background-color: #FFFFFF;
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 7px 11px;
+                font-size: 13px;
+                color: #0F172A;
+                min-height: 20px;
             }
-            QComboBox:focus, QSpinBox:focus { border: 2px solid #2563EB; }
+            QComboBox:hover, QSpinBox:hover {
+                border-color: #94A3B8;
+            }
+            QComboBox:focus, QSpinBox:focus {
+                border: 1.5px solid #2563EB;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #FFFFFF;
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 4px;
+                color: #0F172A;
+                selection-background-color: #F1F5F9;
+                selection-color: #0F172A;
+            }
+            #badgeOk {
+                background-color: #ECFDF5;
+                color: #065F46;
+                border: 1px solid #A7F3D0;
+                border-radius: 4px;
+                padding: 3px 9px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            #badgeError {
+                background-color: #FEF2F2;
+                color: #991B1B;
+                border: 1px solid #FECACA;
+                border-radius: 4px;
+                padding: 3px 9px;
+                font-size: 11px;
+                font-weight: 600;
+            }
             #generateButton {
-                background-color: #1E3A8A; color: #FFFFFF; font-size: 15px; font-weight: bold;
-                border: none; border-radius: 8px; padding: 12px 24px;
+                background-color: #0F172A;
+                color: #FFFFFF;
+                font-size: 14px;
+                font-weight: 600;
+                border: none;
+                border-radius: 6px;
+                padding: 12px 24px;
+                min-height: 20px;
             }
-            #generateButton:hover { background-color: #1E40AF; }
-            #generateButton:disabled { background-color: #94A3B8; }
+            #generateButton:hover {
+                background-color: #1E293B;
+            }
+            #generateButton:pressed {
+                background-color: #020617;
+            }
+            #generateButton:disabled {
+                background-color: #E2E8F0;
+                color: #94A3B8;
+            }
             #progressBar {
-                border: 1px solid #E2E8F0; border-radius: 6px; text-align: center;
-                background-color: #F1F5F9; color: #0F172A; font-weight: bold; height: 22px;
+                border: none;
+                border-radius: 3px;
+                background-color: #E2E8F0;
+                height: 6px;
+                text-align: center;
             }
-            #progressBar::chunk { background-color: #059669; border-radius: 5px; }
-            #infoLabel { font-size: 13px; color: #475569; }
-            #resultsCard { background-color: #F0FDF4; border: 1px solid #BBF7D0; border-radius: 10px; padding: 16px; }
-            #resultsTitle { font-size: 15px; font-weight: bold; color: #166534; }
-            #resultsInfo { font-size: 13px; color: #15803D; }
-            #actionBtn {
-                background-color: #059669; color: #FFFFFF; font-size: 13px; font-weight: 600;
-                border: none; border-radius: 6px; padding: 9px 16px;
+            #progressBar::chunk {
+                background-color: #2563EB;
+                border-radius: 3px;
             }
-            #actionBtn:hover { background-color: #047857; }
+            #infoLabel {
+                font-size: 13px;
+                color: #64748B;
+                font-weight: 500;
+            }
+            #resultsCard {
+                background-color: #FFFFFF;
+                border: 1px solid #CBD5E1;
+                border-radius: 8px;
+                padding: 18px 20px;
+            }
+            #resultsTitle {
+                font-size: 15px;
+                font-weight: 600;
+                color: #0F172A;
+            }
+            #resultsInfo {
+                font-size: 13px;
+                color: #334155;
+                line-height: 1.5;
+            }
+            #actionPrimaryBtn {
+                background-color: #2563EB;
+                color: #FFFFFF;
+                font-size: 13px;
+                font-weight: 600;
+                border: none;
+                border-radius: 6px;
+                padding: 9px 16px;
+            }
+            #actionPrimaryBtn:hover {
+                background-color: #1D4ED8;
+            }
+            #actionResultBtn {
+                background-color: #FFFFFF;
+                color: #1E293B;
+                font-size: 13px;
+                font-weight: 500;
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 9px 16px;
+            }
+            #actionResultBtn:hover {
+                background-color: #F8FAFC;
+                border-color: #94A3B8;
+            }
             #actionSecondaryBtn {
-                background-color: #FFFFFF; color: #334155; font-size: 13px; font-weight: 600;
-                border: 1px solid #CBD5E1; border-radius: 6px; padding: 9px 16px;
+                background-color: #FFFFFF;
+                color: #334155;
+                font-size: 12px;
+                font-weight: 500;
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 6px 12px;
             }
-            #actionSecondaryBtn:hover { background-color: #F8FAFC; }
+            #actionSecondaryBtn:hover {
+                background-color: #F8FAFC;
+                border-color: #94A3B8;
+            }
         """)
 
     def _check_config_files(self):
+        if not self.config_dir.exists() and (APP_DIR / "configuracion_ejemplo").exists():
+            self.config_dir = APP_DIR / "configuracion_ejemplo"
+        self.seq_path = self.config_dir / "Secuencias_Turnos_Limpio.xlsx"
+        if not self.seq_path.exists():
+            self.seq_path = self.config_dir / "Secuencias_Turnos.xlsx"
+        self.pref_path = self.config_dir / "Plantilla_Conocimientos_y_Preferencias.xlsx"
+
+        self.seq_path_lbl.setText(self.seq_path.name)
+        self.pref_path_lbl.setText(self.pref_path.name)
+
         seq_ok = self.seq_path.exists()
         pref_ok = self.pref_path.exists()
 
         if seq_ok:
-            self.seq_status_lbl.setText("✔ Secuencias de Turnos:")
-            self.seq_status_lbl.setStyleSheet("color: #059669;")
+            self.seq_status_lbl.setText("Disponible")
+            self.seq_status_lbl.setObjectName("badgeOk")
         else:
-            self.seq_status_lbl.setText("✖ Secuencias no encontradas:")
-            self.seq_status_lbl.setStyleSheet("color: #DC2626;")
+            self.seq_status_lbl.setText("No encontrado")
+            self.seq_status_lbl.setObjectName("badgeError")
 
         if pref_ok:
-            self.pref_status_lbl.setText("✔ Conocimientos y Preferencias:")
-            self.pref_status_lbl.setStyleSheet("color: #059669;")
+            self.pref_status_lbl.setText("Disponible")
+            self.pref_status_lbl.setObjectName("badgeOk")
         else:
-            self.pref_status_lbl.setText("✖ Ficha no encontrada:")
-            self.pref_status_lbl.setStyleSheet("color: #DC2626;")
+            self.pref_status_lbl.setText("No encontrado")
+            self.pref_status_lbl.setObjectName("badgeError")
+
+        self.seq_status_lbl.style().unpolish(self.seq_status_lbl)
+        self.seq_status_lbl.style().polish(self.seq_status_lbl)
+        self.pref_status_lbl.style().unpolish(self.pref_status_lbl)
+        self.pref_status_lbl.style().polish(self.pref_status_lbl)
 
         if not (seq_ok and pref_ok):
             self.generate_btn.setEnabled(False)
-            self.status_lbl.setText("Faltan archivos en la carpeta 'configuracion'.")
+            self.status_lbl.setText("Faltan archivos en la carpeta de configuración.")
+        else:
+            self.generate_btn.setEnabled(True)
+            self.status_lbl.setText("Listo para generar.")
 
     def _on_generate_clicked(self):
         self.generate_btn.setEnabled(False)
@@ -453,26 +687,23 @@ class MainWindow(QMainWindow):
     def _on_finished(self, result: MonthResult, schedules, workers, excel_path: str, pdf_path: str):
         self.generate_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
-        self.status_lbl.setText(f"Generación finalizada ({result.status_name}).")
+        self.status_lbl.setText(f"Cálculo completado ({result.status_name}).")
 
         self.last_excel_path = excel_path
         self.last_pdf_path = pdf_path
 
         free_cnt = sum(1 for a in result.assignments if a.position == ".")
         vac_cnt = len(result.vacancies)
-        info_txt = (
-            f"• Estado del cálculo: {result.status_name}  |  "
-            f"Asignaciones: {len(result.assignments)}  |  "
-            f"Libres (.): {free_cnt}  |  "
-            f"Tiempo: {result.execution_time_seconds}s\n"
-            f"• Rango de esfuerzo: {result.effort_spread:.2f} pts/día  "
-            f"(Mín: {result.min_mean_effort:.2f}, Máx: {result.max_mean_effort:.2f})"
-        )
+        info_lines = [
+            f"Estado: {result.status_name}   ·   Asignaciones: {len(result.assignments)}   ·   Libres: {free_cnt}   ·   Tiempo: {result.execution_time_seconds}s",
+            f"Rango de esfuerzo: {result.effort_spread:.2f} pts/día  (Mín: {result.min_mean_effort:.2f}, Máx: {result.max_mean_effort:.2f})",
+        ]
         if vac_cnt > 0:
-            info_txt += f"\n• ⚠️ Puestos descubiertos a revisar a mano: {vac_cnt} (marcados en rojo en el Excel)"
+            info_lines.append(f"Puestos descubiertos para revisión manual: {vac_cnt} (resaltados en el archivo Excel)")
         if result.issues:
-            info_txt += "\n• " + "\n• ".join(result.issues)
-        self.results_info.setText(info_txt)
+            for issue in result.issues:
+                info_lines.append(f"Nota: {issue}")
+        self.results_info.setText("\n".join(info_lines))
         self.open_pdf_btn.setEnabled(bool(pdf_path and Path(pdf_path).exists()))
         self.results_card.setVisible(True)
 
@@ -490,14 +721,28 @@ class MainWindow(QMainWindow):
         if self.last_pdf_path and Path(self.last_pdf_path).exists():
             self._open_file(self.last_pdf_path)
 
-    def _open_folder(self):
-        folder = str(self.out_dir.resolve())
+    def _open_folder_path(self, folder_path: Path):
+        if not folder_path.exists():
+            folder_path.mkdir(parents=True, exist_ok=True)
+        folder = str(folder_path.resolve())
         if platform.system() == "Windows":
             os.startfile(folder)
         elif platform.system() == "Darwin":
             subprocess.run(["open", folder])
         else:
             subprocess.run(["xdg-open", folder])
+
+    def _on_worker_data_saved(self):
+        self._check_config_files()
+
+    def _open_config_folder(self):
+        self._open_folder_path(self.config_dir)
+        self._check_config_files()
+        if hasattr(self, "tab_trabajadores"):
+            self.tab_trabajadores.load_data()
+
+    def _open_folder(self):
+        self._open_folder_path(self.out_dir)
 
     def _open_file(self, filepath: str):
         p = str(Path(filepath).resolve())

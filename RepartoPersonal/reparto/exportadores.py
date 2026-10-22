@@ -17,10 +17,11 @@ Genera:
 """
 
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date
 from io import BytesIO
 from pathlib import Path
 import re
+import shutil
 import subprocess
 from xml.etree.ElementTree import Element, SubElement, tostring
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -694,17 +695,21 @@ def export_month_to_pdf(
         doc.build(elements)
         return output_path
 
-    except Exception:
+    except Exception as exc:
         # Fallback a LibreOffice si ReportLab falla
         excel_path = output_path.with_suffix(".xlsx")
-        if excel_path.exists():
-            cmd = [
-                "libreoffice",
-                "--headless",
-                "--convert-to", "pdf",
-                "--outdir", str(output_path.parent),
-                str(excel_path)
-            ]
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            return output_path
+        lo_bin = shutil.which("libreoffice") or shutil.which("soffice")
+        if lo_bin and excel_path.exists():
+            try:
+                cmd = [
+                    lo_bin,
+                    "--headless",
+                    "--convert-to", "pdf",
+                    "--outdir", str(output_path.parent),
+                    str(excel_path)
+                ]
+                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                return output_path
+            except Exception:
+                raise exc
         raise

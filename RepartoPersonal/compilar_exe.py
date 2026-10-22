@@ -24,6 +24,10 @@ def compilar():
         "--noconfirm",
         "--clean",
         "--collect-all=ortools",
+        "--collect-all=reportlab",
+        "--exclude-module=tests",
+        "--exclude-module=unittest",
+        "--exclude-module=pytest",
         "--windowed",          # Sin ventana de consola negra
         "--onedir",            # Formato carpeta portable rápida
         f"--add-data={reparto_dir}{sep}reparto",
@@ -37,6 +41,21 @@ def compilar():
     print(" ".join(cmd), "\n")
 
     subprocess.run(cmd, check=True)
+
+    # Preparar la carpeta portable con las plantillas de configuración
+    dist_app_dir = BASE_DIR / "dist" / "RepartoPersonal"
+    dist_config = dist_app_dir / "configuracion"
+    dist_results = dist_app_dir / "resultados"
+    dist_results.mkdir(parents=True, exist_ok=True)
+
+    config_src = BASE_DIR / "configuracion"
+    if not config_src.exists():
+        config_src = BASE_DIR / "configuracion_ejemplo"
+
+    if config_src.exists() and not dist_config.exists():
+        import shutil
+        shutil.copytree(config_src, dist_config)
+        print(f"Plantillas copiadas a: {dist_config}")
 
     print("\n----------------------------------------------------")
     print("¡Compilación finalizada con éxito!")

@@ -9,6 +9,7 @@ dist/
 *.spec
 *.sqlite*
 *.db
+*.bak
 .pytest_cache/
 outputs/
 datos/
@@ -32,9 +33,11 @@ RepartoPersonal/build/
 AGENTS.md
 CONTEXTO_Y_ARQUITECTURA.md
 
-# Tests
+# Tests y fixtures (estrictamente locales, nunca a repositorios remotos)
 tests/
 test/
 **/tests/
 **/test/
+RepartoPersonal/tests/
 *test*.py
+*test_output*
