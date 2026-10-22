@@ -460,18 +460,18 @@ class TrabajadoresTab(QWidget):
                 font-size: 13px;
                 color: #0F172A;
             }
-            #searchInput:focus { border: 1.5px solid #2563EB; }
+            #searchInput:focus { border: 1.5px solid #0284C7; }
             #summaryBadge {
-                background-color: #F1F5F9;
-                color: #475569;
-                border: 1px solid #E2E8F0;
+                background-color: #F0F9FF;
+                color: #0369A1;
+                border: 1px solid #BAE6FD;
                 border-radius: 6px;
                 padding: 6px 12px;
                 font-size: 12px;
                 font-weight: 600;
             }
             #saveExcelButton {
-                background-color: #0F172A;
+                background-color: #0284C7;
                 color: #FFFFFF;
                 border: none;
                 border-radius: 6px;
@@ -479,8 +479,8 @@ class TrabajadoresTab(QWidget):
                 font-size: 13px;
                 font-weight: 600;
             }
-            #saveExcelButton:hover { background-color: #1E293B; }
-            #saveExcelButton:pressed { background-color: #020617; }
+            #saveExcelButton:hover { background-color: #0369A1; }
+            #saveExcelButton:pressed { background-color: #075985; }
             #sectionTitle {
                 font-size: 13px;
                 font-weight: 600;

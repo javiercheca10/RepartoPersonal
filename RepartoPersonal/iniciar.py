@@ -13,6 +13,7 @@ import subprocess
 import sys
 
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -139,6 +140,13 @@ class MainWindow(QMainWindow):
         self.last_excel_path = ""
         self.last_pdf_path = ""
 
+        # Identidad visual e icono
+        self.icon_path = APP_DIR / "reparto" / "assets" / "icono.png"
+        if not self.icon_path.exists():
+            self.icon_path = APP_DIR / "reparto" / "assets" / "icono_48.png"
+        if self.icon_path.exists():
+            self.setWindowIcon(QIcon(str(self.icon_path)))
+
         self._setup_ui()
         self._apply_styles()
         self._check_config_files()
@@ -150,7 +158,19 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(28, 20, 28, 20)
         main_layout.setSpacing(14)
 
-        # 1. Cabecera Común
+        # 1. Cabecera Común (Icono de Identidad + Título)
+        header_row = QHBoxLayout()
+        header_row.setSpacing(14)
+        header_row.setAlignment(Qt.AlignVCenter)
+
+        if self.icon_path.exists():
+            icon_lbl = QLabel()
+            pix = QPixmap(str(self.icon_path)).scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            icon_lbl.setPixmap(pix)
+            icon_lbl.setFixedSize(48, 48)
+            icon_lbl.setObjectName("headerAppIcon")
+            header_row.addWidget(icon_lbl)
+
         header_box = QVBoxLayout()
         header_box.setSpacing(3)
         title_lbl = QLabel("Planificación de Puestos de Trabajo")
@@ -159,7 +179,9 @@ class MainWindow(QMainWindow):
         subtitle_lbl.setObjectName("subtitleLabel")
         header_box.addWidget(title_lbl)
         header_box.addWidget(subtitle_lbl)
-        main_layout.addLayout(header_box)
+
+        header_row.addLayout(header_box, 1)
+        main_layout.addLayout(header_row)
 
         # 2. Selector de Pestañas
         self.tab_widget = QTabWidget()
@@ -394,8 +416,8 @@ class MainWindow(QMainWindow):
                 color: #0F172A;
             }
             QTabBar::tab:selected {
-                color: #2563EB;
-                border-bottom: 2px solid #2563EB;
+                color: #0284C7;
+                border-bottom: 2px solid #0284C7;
             }
             #titleLabel {
                 font-size: 20px;
@@ -406,6 +428,9 @@ class MainWindow(QMainWindow):
             #subtitleLabel {
                 font-size: 13px;
                 color: #64748B;
+            }
+            #headerAppIcon {
+                border-radius: 10px;
             }
             #separator {
                 color: #E2E8F0;
@@ -458,7 +483,7 @@ class MainWindow(QMainWindow):
                 border-color: #94A3B8;
             }
             QComboBox:focus, QSpinBox:focus {
-                border: 1.5px solid #2563EB;
+                border: 1.5px solid #0284C7;
             }
             QComboBox QAbstractItemView {
                 background-color: #FFFFFF;
@@ -466,8 +491,8 @@ class MainWindow(QMainWindow):
                 border-radius: 6px;
                 padding: 4px;
                 color: #0F172A;
-                selection-background-color: #F1F5F9;
-                selection-color: #0F172A;
+                selection-background-color: #F0F9FF;
+                selection-color: #0284C7;
             }
             #badgeOk {
                 background-color: #ECFDF5;
@@ -488,7 +513,7 @@ class MainWindow(QMainWindow):
                 font-weight: 600;
             }
             #generateButton {
-                background-color: #0F172A;
+                background-color: #0284C7;
                 color: #FFFFFF;
                 font-size: 14px;
                 font-weight: 600;
@@ -498,10 +523,10 @@ class MainWindow(QMainWindow):
                 min-height: 20px;
             }
             #generateButton:hover {
-                background-color: #1E293B;
+                background-color: #0369A1;
             }
             #generateButton:pressed {
-                background-color: #020617;
+                background-color: #075985;
             }
             #generateButton:disabled {
                 background-color: #E2E8F0;
@@ -515,7 +540,7 @@ class MainWindow(QMainWindow):
                 text-align: center;
             }
             #progressBar::chunk {
-                background-color: #2563EB;
+                background-color: #0EA5E9;
                 border-radius: 3px;
             }
             #infoLabel {
@@ -540,7 +565,7 @@ class MainWindow(QMainWindow):
                 line-height: 1.5;
             }
             #actionPrimaryBtn {
-                background-color: #2563EB;
+                background-color: #0284C7;
                 color: #FFFFFF;
                 font-size: 13px;
                 font-weight: 600;
@@ -549,7 +574,7 @@ class MainWindow(QMainWindow):
                 padding: 9px 16px;
             }
             #actionPrimaryBtn:hover {
-                background-color: #1D4ED8;
+                background-color: #0369A1;
             }
             #actionResultBtn {
                 background-color: #FFFFFF;
@@ -757,6 +782,9 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    icon_path = APP_DIR / "reparto" / "assets" / "icono.png"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
