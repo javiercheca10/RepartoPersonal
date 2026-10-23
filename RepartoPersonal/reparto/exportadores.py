@@ -280,12 +280,19 @@ def export_month_to_excel(
     schedules: tuple[DaySchedule, ...],
     workers: tuple[WorkerProfile, ...],
     output_path: Path,
+    positions: tuple[str, ...] | None = None,
 ) -> None:
     """Genera el libro Excel oficial del mes reproduciendo el formato exacto de PUESTOS NUEVOS."""
     month_name = MONTH_NAMES_ES[result.month]
     year_short = str(result.year)[-2:]
     sheet_title = f"{month_name.upper()} {year_short}"
     num_days = len(schedules)
+
+    active_positions = (
+        positions
+        if positions is not None
+        else (tuple(schedules[0].targets_m.keys()) if schedules and schedules[0].targets_m else POSITIONS)
+    )
 
     # Indexar asignaciones por (worker_id, day) -> list of Assignment
     asgs_by_worker_day = defaultdict(list)
@@ -398,7 +405,7 @@ def export_month_to_excel(
     sheet1_xml = _create_sheet_xml(sheet1_rows, sheet1_widths, header_split_row=3, split_col=2)
 
     # --- HOJA 2: RESUMEN Y ESFUERZO DETALLADO ---
-    sheet2_widths = [5, 34, 9, 8, 9, 8] + [7] * len(POSITIONS)
+    sheet2_widths = [5, 34, 9, 8, 9, 8] + [7] * len(active_positions)
     sheet2_rows = []
 
     sheet2_rows.append((28, [(f"RESUMEN DE ESFUERZO Y DISTRIBUCIÓN — {month_name.upper()} {result.year}", 16)]))
@@ -412,7 +419,7 @@ def export_month_to_excel(
         ("Media/Día", 9),
         ("Libre (.)", 9),
     ]
-    for pos in POSITIONS:
+    for pos in active_positions:
         hdr2.append((pos, 9))
     sheet2_rows.append((24, hdr2))
 
@@ -431,12 +438,12 @@ def export_month_to_excel(
                 (we.mean_effort, 13),
                 (we.free_days, s_num),
             ]
-            for pos in POSITIONS:
+            for pos in active_positions:
                 cnt = we.counts_by_position.get(pos, 0)
                 r_cells.append((cnt if cnt > 0 else "", s_num))
         else:
             r_cells = [(idx, s_num), (w.name, s_txt), (0, s_num), (0, s_num), (0.0, 13), (0, s_num)]
-            for _ in POSITIONS:
+            for _ in active_positions:
                 r_cells.append(("", s_num))
 
         sheet2_rows.append((22, r_cells))
@@ -523,6 +530,7 @@ def export_month_to_pdf(
     schedules: tuple[DaySchedule, ...],
     workers: tuple[WorkerProfile, ...],
     output_path: Path,
+    positions: tuple[str, ...] | None = None,
 ) -> Path:
     """Genera el cuadrante mensual en PDF maquetado para impresión directa.
 

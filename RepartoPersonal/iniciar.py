@@ -42,6 +42,8 @@ from reparto.assets import get_app_icon, get_app_pixmap, setup_windows_app_id
 from reparto.datos import (
     cycle_day_matches_weekday,
     load_all_workers,
+    parse_positions_from_header,
+    parse_position_rules,
     project_month,
     suggest_cycle_day,
 )
@@ -82,14 +84,31 @@ class SolverWorkerThread(QThread):
 
     def run(self):
         try:
-            self.progress_signal.emit("Cargando archivos de configuración...", 15)
-            workers = load_all_workers(self.seq_path, self.pref_path)
+            self.progress_signal.emit("Cargando archivos de configuración y puestos...", 15)
+            positions = parse_positions_from_header(self.pref_path)
+            rules = parse_position_rules(self.pref_path, positions)
+            workers = load_all_workers(self.seq_path, self.pref_path, positions=positions)
 
             self.progress_signal.emit("Proyectando calendario laboral y turnos...", 35)
-            schedules = project_month(self.year, self.month, self.start_cycle_day, workers)
+            schedules = project_month(
+                self.year,
+                self.month,
+                self.start_cycle_day,
+                workers,
+                positions=positions,
+                position_rules=rules,
+            )
 
             self.progress_signal.emit("Optimizando asignación y equidad de puestos con CP-SAT...", 60)
-            result = solve_month(self.year, self.month, schedules, workers, time_limit_seconds=self.time_limit)
+            result = solve_month(
+                self.year,
+                self.month,
+                schedules,
+                workers,
+                positions=positions,
+                position_rules=rules,
+                time_limit_seconds=self.time_limit,
+            )
 
             if not result.is_optimal and len(result.assignments) == 0:
                 self.error_signal.emit(
@@ -101,13 +120,13 @@ class SolverWorkerThread(QThread):
             self.out_dir.mkdir(parents=True, exist_ok=True)
             month_name = MONTHS_ES[self.month - 1][0]
             excel_path = self.out_dir / f"Cuadrante_{month_name}_{self.year}.xlsx"
-            export_month_to_excel(result, schedules, workers, excel_path)
+            export_month_to_excel(result, schedules, workers, excel_path, positions=positions)
 
             self.progress_signal.emit("Generando cuadrante PDF oficial...", 95)
             pdf_str = ""
             try:
                 pdf_path = self.out_dir / f"Cuadrante_{month_name}_{self.year}.pdf"
-                export_month_to_pdf(result, schedules, workers, pdf_path)
+                export_month_to_pdf(result, schedules, workers, pdf_path, positions=positions)
                 pdf_str = str(pdf_path)
             except Exception:
                 pass  # Si ocurre algún fallo imprevisto, se continúa con el Excel generado
@@ -387,6 +406,7 @@ class MainWindow(QMainWindow):
         self.tab_trabajadores = TrabajadoresTab(self.pref_path)
         self.tab_trabajadores.data_saved.connect(self._on_worker_data_saved)
         self.tab_widget.addTab(self.tab_trabajadores, "Trabajadores")
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
 
         main_layout.addWidget(self.tab_widget, 1)
 
@@ -756,6 +776,10 @@ class MainWindow(QMainWindow):
 
     def _on_worker_data_saved(self):
         self._check_config_files()
+
+    def _on_tab_changed(self, index: int):
+        if index == 1 and hasattr(self, "tab_trabajadores"):
+            self.tab_trabajadores.load_data()
 
     def _open_config_folder(self):
         self._open_folder_path(self.config_dir)

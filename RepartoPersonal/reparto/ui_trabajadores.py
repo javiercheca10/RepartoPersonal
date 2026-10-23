@@ -26,21 +26,27 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
+    QDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from reparto.datos import POSITIONS
+from reparto.datos import DEFAULT_POSITION_RULES, POSITIONS, POSITION_RULES
 from reparto.gestion_trabajadores import (
     EditableWorker,
     load_editable_workers,
@@ -285,6 +291,320 @@ class DraggablePreferenceList(QListWidget):
             item.setText(f"{i + 1}º — {pos}")
 
 
+class AddWorkerDialog(QDialog):
+    """Diálogo modal para dar de alta a un nuevo profesional."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Añadir Profesional")
+        self.setFixedSize(400, 230)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(22, 20, 22, 20)
+
+        title = QLabel("Alta de Profesional")
+        title.setStyleSheet("font-size: 15px; font-weight: 700; color: #0F172A;")
+        layout.addWidget(title)
+
+        name_lbl = QLabel("Apellidos y Nombre:")
+        name_lbl.setStyleSheet("font-size: 12px; font-weight: 600; color: #475569;")
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("Ej: GARCIA LOPEZ, MARIA")
+        layout.addWidget(name_lbl)
+        layout.addWidget(self.name_input)
+
+        status_lbl = QLabel("Estado inicial:")
+        status_lbl.setStyleSheet("font-size: 12px; font-weight: 600; color: #475569;")
+        self.status_combo = QComboBox()
+        self.status_combo.addItem("Disponible (en activo)", False)
+        self.status_combo.addItem("De baja temporal", True)
+        layout.addWidget(status_lbl)
+        layout.addWidget(self.status_combo)
+
+        btn_box = QHBoxLayout()
+        btn_box.setSpacing(10)
+        self.cancel_btn = QPushButton("Cancelar")
+        self.cancel_btn.clicked.connect(self.reject)
+        self.accept_btn = QPushButton("Añadir Profesional")
+        self.accept_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0284C7;
+                color: white;
+                font-weight: 600;
+                padding: 7px 16px;
+                border-radius: 6px;
+                border: none;
+            }
+            QPushButton:hover { background-color: #0369A1; }
+        """)
+        self.accept_btn.clicked.connect(self._validate_and_accept)
+        btn_box.addStretch()
+        btn_box.addWidget(self.cancel_btn)
+        btn_box.addWidget(self.accept_btn)
+        layout.addLayout(btn_box)
+
+    def _validate_and_accept(self):
+        txt = self.name_input.text().strip()
+        if not txt:
+            QMessageBox.warning(self, "Nombre requerido", "Debe indicar el nombre del profesional.")
+            return
+        self.accept()
+
+    def get_data(self) -> tuple[str, bool]:
+        return " ".join(self.name_input.text().strip().split()).upper(), bool(self.status_combo.currentData())
+
+
+class PuestosDotacionesDialog(QDialog):
+    """Diálogo modal para consultar y editar el catálogo de puestos, objetivos (M/T), mínimos y prioridad."""
+    def __init__(self, positions: tuple[str, ...], rules: dict[str, dict], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Configurar Catálogo de Puestos y Dotaciones")
+        self.resize(840, 520)
+        self.positions = list(positions)
+        self.rules = {k: dict(v) for k, v in rules.items()}
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(22, 20, 22, 20)
+
+        hdr_box = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title = QLabel("Catálogo de Puestos y Dotaciones del Servicio")
+        title.setStyleSheet("font-size: 16px; font-weight: 700; color: #0F172A;")
+        sub = QLabel("Configure las dotaciones de mañana y tarde, mínimos requeridos y criterios de reducción ante déficit.")
+        sub.setStyleSheet("font-size: 12px; color: #64748B;")
+        title_box.addWidget(title)
+        title_box.addWidget(sub)
+        hdr_box.addLayout(title_box, 1)
+
+        self.add_pos_btn = QPushButton("+ Añadir Puesto")
+        self.add_pos_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0284C7;
+                color: white;
+                font-weight: 600;
+                padding: 6px 12px;
+                border-radius: 6px;
+                border: none;
+            }
+            QPushButton:hover { background-color: #0369A1; }
+        """)
+        self.add_pos_btn.clicked.connect(self._on_add_position)
+
+        self.del_pos_btn = QPushButton("🗑️ Eliminar Puesto")
+        self.del_pos_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #DC2626;
+                border: 1px solid #FECACA;
+                font-weight: 600;
+                padding: 6px 12px;
+                border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #FEF2F2; }
+        """)
+        self.del_pos_btn.clicked.connect(self._on_del_position)
+
+        hdr_box.addWidget(self.add_pos_btn)
+        hdr_box.addWidget(self.del_pos_btn)
+        layout.addLayout(hdr_box)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels([
+            "Código", "Denominación del Puesto", "Obj. M", "Obj. T", "Mín. M", "Mín. T", "Criterio de Reducción"
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        for i in range(2, 6):
+            self.table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        layout.addWidget(self.table, 1)
+
+        self._populate_table()
+
+        btn_box = QHBoxLayout()
+        self.cancel_btn = QPushButton("Cancelar")
+        self.cancel_btn.clicked.connect(self.reject)
+        self.save_btn = QPushButton("Aplicar Configuración")
+        self.save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0284C7;
+                color: white;
+                font-weight: 600;
+                padding: 8px 20px;
+                border-radius: 6px;
+                border: none;
+                font-size: 13px;
+            }
+            QPushButton:hover { background-color: #0369A1; }
+        """)
+        self.save_btn.clicked.connect(self._on_save)
+        btn_box.addStretch()
+        btn_box.addWidget(self.cancel_btn)
+        btn_box.addWidget(self.save_btn)
+        layout.addLayout(btn_box)
+
+    def _populate_table(self):
+        self.table.setRowCount(len(self.positions))
+        for row, pos in enumerate(self.positions):
+            r_info = self.rules.get(pos, {})
+            name = r_info.get("name", pos)
+            tm = r_info.get("target_m", 1)
+            tt = r_info.get("target_t", 1)
+            mm = r_info.get("min_m", tm)
+            mt = r_info.get("min_t", tt)
+            prio = r_info.get("priority", 0)
+
+            # Col 0: Código
+            c_code = QLineEdit(pos)
+            c_code.setMaxLength(8)
+            self.table.setCellWidget(row, 0, c_code)
+
+            # Col 1: Denominación
+            c_name = QLineEdit(name)
+            self.table.setCellWidget(row, 1, c_name)
+
+            # Col 2: Obj M
+            s_tm = QSpinBox()
+            s_tm.setRange(0, 30)
+            s_tm.setValue(tm)
+            self.table.setCellWidget(row, 2, s_tm)
+
+            # Col 3: Obj T
+            s_tt = QSpinBox()
+            s_tt.setRange(0, 30)
+            s_tt.setValue(tt)
+            self.table.setCellWidget(row, 3, s_tt)
+
+            # Col 4: Min M
+            s_mm = QSpinBox()
+            s_mm.setRange(0, 30)
+            s_mm.setValue(mm)
+            self.table.setCellWidget(row, 4, s_mm)
+
+            # Col 5: Min T
+            s_mt = QSpinBox()
+            s_mt.setRange(0, 30)
+            s_mt.setValue(mt)
+            self.table.setCellWidget(row, 5, s_mt)
+
+            # Col 6: Prioridad
+            cb_prio = QComboBox()
+            cb_prio.addItem("Estricto (no se reduce)", 0)
+            cb_prio.addItem("Reducible Nivel 1 (se reduce primero)", 1)
+            cb_prio.addItem("Reducible Nivel 2 (se reduce después de nivel 1)", 2)
+            cb_prio.setCurrentIndex(min(2, max(0, prio)))
+            self.table.setCellWidget(row, 6, cb_prio)
+
+    def _on_add_position(self):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+
+        c_code = QLineEdit(f"P{row + 1}")
+        c_code.setMaxLength(8)
+        self.table.setCellWidget(row, 0, c_code)
+
+        c_name = QLineEdit(f"Nuevo Puesto {row + 1}")
+        self.table.setCellWidget(row, 1, c_name)
+
+        s_tm = QSpinBox()
+        s_tm.setRange(0, 30)
+        s_tm.setValue(1)
+        self.table.setCellWidget(row, 2, s_tm)
+
+        s_tt = QSpinBox()
+        s_tt.setRange(0, 30)
+        s_tt.setValue(1)
+        self.table.setCellWidget(row, 3, s_tt)
+
+        s_mm = QSpinBox()
+        s_mm.setRange(0, 30)
+        s_mm.setValue(1)
+        self.table.setCellWidget(row, 4, s_mm)
+
+        s_mt = QSpinBox()
+        s_mt.setRange(0, 30)
+        s_mt.setValue(1)
+        self.table.setCellWidget(row, 5, s_mt)
+
+        cb_prio = QComboBox()
+        cb_prio.addItem("Estricto (no se reduce)", 0)
+        cb_prio.addItem("Reducible Nivel 1 (se reduce primero)", 1)
+        cb_prio.addItem("Reducible Nivel 2 (se reduce después de nivel 1)", 2)
+        cb_prio.setCurrentIndex(0)
+        self.table.setCellWidget(row, 6, cb_prio)
+
+        self.table.selectRow(row)
+
+    def _on_del_position(self):
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Seleccionar", "Seleccione el puesto que desea eliminar.")
+            return
+        if self.table.rowCount() <= 1:
+            QMessageBox.warning(self, "Aviso", "El catálogo debe contener al menos 1 puesto de trabajo.")
+            return
+        code_w = self.table.cellWidget(row, 0)
+        code = code_w.text().strip().upper() if code_w else f"Fila {row + 1}"
+        reply = QMessageBox.question(
+            self,
+            "Eliminar Puesto",
+            f"¿Desea eliminar el puesto '{code}' del catálogo?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.table.removeRow(row)
+
+    def _on_save(self):
+        new_positions = []
+        new_rules = {}
+
+        for r in range(self.table.rowCount()):
+            code_w = self.table.cellWidget(r, 0)
+            code = code_w.text().strip().upper() if code_w else ""
+            if not code:
+                QMessageBox.warning(self, "Código vacío", f"La fila {r + 1} no tiene código de puesto.")
+                return
+            if code in new_positions:
+                QMessageBox.warning(self, "Código duplicado", f"El código '{code}' aparece más de una vez.")
+                return
+            new_positions.append(code)
+
+            name_w = self.table.cellWidget(r, 1)
+            name = name_w.text().strip() if name_w else code
+
+            tm = self.table.cellWidget(r, 2).value()
+            tt = self.table.cellWidget(r, 3).value()
+            mm = self.table.cellWidget(r, 4).value()
+            mt = self.table.cellWidget(r, 5).value()
+            prio = self.table.cellWidget(r, 6).currentData()
+
+            # Mínimo no puede ser mayor que el objetivo
+            if mm > tm:
+                mm = tm
+            if mt > tt:
+                mt = tt
+
+            new_rules[code] = {
+                "name": name,
+                "target_m": tm,
+                "target_t": tt,
+                "min_m": mm,
+                "min_t": mt,
+                "priority": int(prio),
+            }
+
+        self.positions = new_positions
+        self.rules = new_rules
+        self.accept()
+
+    def get_data(self) -> tuple[tuple[str, ...], dict[str, dict]]:
+        return tuple(self.positions), self.rules
+
+
 class TrabajadoresTab(QWidget):
     """Pestaña integral de gestión de trabajadores con vista Maestro-Detalle."""
     data_saved = Signal()
@@ -293,6 +613,8 @@ class TrabajadoresTab(QWidget):
         super().__init__(parent)
         self.pref_path = Path(pref_path)
         self.workers: list[EditableWorker] = []
+        self.positions: tuple[str, ...] = POSITIONS
+        self.rules: dict[str, dict] = dict(POSITION_RULES)
         self.current_worker: EditableWorker | None = None
         self.chip_widgets: dict[str, PositionChipButton] = {}
 
@@ -304,9 +626,9 @@ class TrabajadoresTab(QWidget):
         main_layout.setContentsMargins(24, 20, 24, 20)
         main_layout.setSpacing(14)
 
-        # 1. Barra Superior: Buscador + Contador + Botón Guardar
+        # 1. Barra Superior: Buscador + Contador + Botones de Acción
         top_bar = QHBoxLayout()
-        top_bar.setSpacing(14)
+        top_bar.setSpacing(10)
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Buscar por nombre de trabajador...")
@@ -317,6 +639,18 @@ class TrabajadoresTab(QWidget):
         self.summary_badge = QLabel("0 trabajadores")
         self.summary_badge.setObjectName("summaryBadge")
         top_bar.addWidget(self.summary_badge)
+
+        self.reload_btn = QPushButton("🔄 Recargar")
+        self.reload_btn.setObjectName("secondaryBtn")
+        self.reload_btn.setToolTip("Recargar datos desde el archivo Excel para detectar cambios externos.")
+        self.reload_btn.clicked.connect(self._on_reload_clicked)
+        top_bar.addWidget(self.reload_btn)
+
+        self.positions_btn = QPushButton("⚙️ Puestos y Dotaciones")
+        self.positions_btn.setObjectName("secondaryBtn")
+        self.positions_btn.setToolTip("Consultar y editar el catálogo de puestos, objetivos (M/T), mínimos y reglas.")
+        self.positions_btn.clicked.connect(self._open_positions_dialog)
+        top_bar.addWidget(self.positions_btn)
 
         self.save_btn = QPushButton("Guardar Cambios en Excel")
         self.save_btn.setObjectName("saveExcelButton")
@@ -353,7 +687,12 @@ class TrabajadoresTab(QWidget):
         self.workers_list = QListWidget()
         self.workers_list.setObjectName("workersMasterList")
         self.workers_list.currentRowChanged.connect(self._on_worker_selected)
-        left_layout.addWidget(self.workers_list)
+        left_layout.addWidget(self.workers_list, 1)
+
+        self.add_worker_btn = QPushButton("+ Añadir Profesional")
+        self.add_worker_btn.setObjectName("addWorkerBtn")
+        self.add_worker_btn.clicked.connect(self._on_add_worker)
+        left_layout.addWidget(self.add_worker_btn)
 
         splitter.addWidget(left_panel)
 
@@ -364,8 +703,9 @@ class TrabajadoresTab(QWidget):
         right_layout.setContentsMargins(16, 0, 0, 0)
         right_layout.setSpacing(16)
 
-        # Cabecera de la Ficha: Nombre y Deslizador de Baja
+        # Cabecera de la Ficha: Nombre, Botón Eliminar y Deslizador de Baja
         detail_header = QHBoxLayout()
+        detail_header.setSpacing(12)
         name_box = QVBoxLayout()
         name_box.setSpacing(2)
 
@@ -376,6 +716,12 @@ class TrabajadoresTab(QWidget):
         name_box.addWidget(self.worker_name_lbl)
         name_box.addWidget(self.worker_sub_lbl)
         detail_header.addLayout(name_box, 1)
+
+        self.del_worker_btn = QPushButton("🗑️ Eliminar")
+        self.del_worker_btn.setObjectName("deleteBtn")
+        self.del_worker_btn.setToolTip("Eliminar a este profesional de la lista de trabajadores.")
+        self.del_worker_btn.clicked.connect(self._on_delete_worker)
+        detail_header.addWidget(self.del_worker_btn)
 
         # Deslizador de Estado (Verde Disponible / Rojo De baja)
         switch_box = QVBoxLayout()
@@ -405,21 +751,12 @@ class TrabajadoresTab(QWidget):
         skills_sec.addWidget(sec1_title)
         skills_sec.addWidget(sec1_hint)
 
-        # Grid 4x4 de chips
-        grid_widget = QWidget()
-        grid_layout = QGridLayout(grid_widget)
-        grid_layout.setSpacing(8)
-        grid_layout.setContentsMargins(0, 6, 0, 6)
+        self.grid_widget = QWidget()
+        self.grid_layout = QGridLayout(self.grid_widget)
+        self.grid_layout.setSpacing(8)
+        self.grid_layout.setContentsMargins(0, 6, 0, 6)
 
-        for idx, pos in enumerate(POSITIONS):
-            row = idx // 4
-            col = idx % 4
-            chip = PositionChipButton(pos)
-            chip.state_changed.connect(self._on_chip_state_changed)
-            self.chip_widgets[pos] = chip
-            grid_layout.addWidget(chip, row, col)
-
-        skills_sec.addWidget(grid_widget)
+        skills_sec.addWidget(self.grid_widget)
         right_layout.addLayout(skills_sec)
 
         sep2 = QFrame()
@@ -450,6 +787,112 @@ class TrabajadoresTab(QWidget):
         main_layout.addWidget(splitter, 1)
         self._apply_styles()
 
+    def rebuild_position_chips(self, positions: tuple[str, ...]):
+        """Reconstruye dinámicamente los chips de competencias según el catálogo de puestos."""
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        self.chip_widgets.clear()
+
+        n_cols = 4 if len(positions) <= 8 else (5 if len(positions) >= 15 else 4)
+        for idx, pos in enumerate(positions):
+            row = idx // n_cols
+            col = idx % n_cols
+            chip = PositionChipButton(pos)
+            chip.state_changed.connect(self._on_chip_state_changed)
+            self.chip_widgets[pos] = chip
+            self.grid_layout.addWidget(chip, row, col)
+
+        if self.current_worker:
+            for pos, chip in self.chip_widgets.items():
+                chip.set_state(self.current_worker.skills.get(pos, ""))
+
+    def _show_notification(self, text: str):
+        self.notification_lbl.setText(text)
+        self.notification_lbl.setVisible(True)
+        self._notification_timer.start(4000)
+
+    def _on_reload_clicked(self):
+        self.load_data()
+        self._show_notification("✔ Datos sincronizados con el archivo Excel.")
+
+    def _on_add_worker(self):
+        dlg = AddWorkerDialog(parent=self)
+        if dlg.exec() == QDialog.Accepted:
+            name, is_baja = dlg.get_data()
+            if any(w.name.upper() == name for w in self.workers):
+                QMessageBox.warning(self, "Nombre duplicado", f"Ya existe un profesional con el nombre '{name}'.")
+                return
+            new_worker = EditableWorker(
+                name=name,
+                row_index=len(self.workers) + 4,
+                is_baja=is_baja,
+                skills={p: "" for p in self.positions},
+                preference_order=[],
+            )
+            self.workers.append(new_worker)
+            self._render_master_list()
+            # Seleccionar nuevo trabajador
+            for r in range(self.workers_list.count()):
+                w = self.workers_list.item(r).data(Qt.UserRole)
+                if w.name == name:
+                    self.workers_list.setCurrentRow(r)
+                    break
+            self._update_summary()
+            self._show_notification(f"✔ Profesional '{name}' añadido. Asigne sus competencias y guarde.")
+
+    def _on_delete_worker(self):
+        if not self.current_worker:
+            return
+        w = self.current_worker
+        reply = QMessageBox.question(
+            self,
+            "Eliminar Profesional",
+            f"¿Está seguro de que desea eliminar a '{w.name}' del cuadrante?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            name = w.name
+            self.workers.remove(w)
+            self.current_worker = None
+            self._render_master_list()
+            if self.workers_list.count() > 0:
+                self.workers_list.setCurrentRow(0)
+            else:
+                self.worker_name_lbl.setText("Seleccione un profesional")
+                self.worker_sub_lbl.setText("Ficha de competencias y preferencias")
+                for chip in self.chip_widgets.values():
+                    chip.set_state("")
+                self.pref_list.clear()
+            self._update_summary()
+            self._show_notification(f"✔ Profesional '{name}' eliminado de la lista. Recuerde guardar en Excel.")
+
+    def _open_positions_dialog(self):
+        dlg = PuestosDotacionesDialog(self.positions, self.rules, parent=self)
+        if dlg.exec() == QDialog.Accepted:
+            new_positions, new_rules = dlg.get_data()
+            self.positions = new_positions
+            self.rules = new_rules
+
+            # Actualizar competencias de trabajadores actuales para el nuevo catálogo
+            for w in self.workers:
+                for p in new_positions:
+                    if p not in w.skills:
+                        w.skills[p] = ""
+                w.skills = {p: st for p, st in w.skills.items() if p in new_positions}
+                w.preference_order = [p for p in w.preference_order if p in new_positions]
+
+            self.rebuild_position_chips(self.positions)
+            if self.current_worker:
+                for pos, chip in self.chip_widgets.items():
+                    chip.set_state(self.current_worker.skills.get(pos, ""))
+                self.pref_list.set_preferences(self.current_worker.preference_order)
+            self._render_master_list()
+            self._show_notification("✔ Puestos actualizados. Haga clic en 'Guardar Cambios en Excel' para persistir.")
+
     def _apply_styles(self):
         self.setStyleSheet("""
             #searchInput {
@@ -469,6 +912,46 @@ class TrabajadoresTab(QWidget):
                 padding: 6px 12px;
                 font-size: 12px;
                 font-weight: 600;
+            }
+            #secondaryBtn {
+                background-color: #FFFFFF;
+                color: #334155;
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 8px 14px;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            #secondaryBtn:hover {
+                background-color: #F8FAFC;
+                border-color: #94A3B8;
+                color: #0F172A;
+            }
+            #addWorkerBtn {
+                background-color: #F0F9FF;
+                color: #0284C7;
+                border: 1.5px dashed #BAE6FD;
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            #addWorkerBtn:hover {
+                background-color: #E0F2FE;
+                border-color: #0284C7;
+            }
+            #deleteBtn {
+                background-color: #FFFFFF;
+                color: #DC2626;
+                border: 1px solid #FECACA;
+                border-radius: 6px;
+                padding: 6px 12px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            #deleteBtn:hover {
+                background-color: #FEF2F2;
+                border-color: #EF4444;
             }
             #saveExcelButton {
                 background-color: #0284C7;
@@ -550,6 +1033,9 @@ class TrabajadoresTab(QWidget):
             return
         try:
             self.workers = load_editable_workers(self.pref_path)
+            self.positions = getattr(self.workers, "positions", POSITIONS)
+            self.rules = getattr(self.workers, "rules", dict(POSITION_RULES))
+            self.rebuild_position_chips(self.positions)
             self._render_master_list()
             if self.workers:
                 self.workers_list.setCurrentRow(0)
@@ -650,10 +1136,8 @@ class TrabajadoresTab(QWidget):
             QMessageBox.critical(self, "Error", f"No se encuentra la plantilla en {self.pref_path}")
             return
         try:
-            save_editable_workers(self.pref_path, self.workers)
-            self.notification_lbl.setText("✔ Cambios guardados correctamente en Plantilla_Conocimientos_y_Preferencias.xlsx")
-            self.notification_lbl.setVisible(True)
-            self._notification_timer.start(4000)
+            save_editable_workers(self.pref_path, self.workers, positions=self.positions, rules=self.rules)
+            self._show_notification("✔ Cambios guardados correctamente en Plantilla_Conocimientos_y_Preferencias.xlsx")
             self.data_saved.emit()
         except Exception as e:
             QMessageBox.critical(self, "Error al guardar", f"No se pudo guardar el archivo: {str(e)}")

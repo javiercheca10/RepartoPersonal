@@ -14,10 +14,23 @@ import shutil
 from xml.etree import ElementTree as ET
 import zipfile
 
-from reparto.datos import POSITIONS, _parse_xlsx_cells
+from reparto.datos import (
+    POSITIONS,
+    _parse_xlsx_cells,
+    parse_positions_from_header,
+    parse_position_rules,
+)
 
 MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+class WorkerList(list):
+    """Lista mutable de trabajadores que preserva el catálogo dinámico de puestos y sus reglas."""
+    def __init__(self, iterable=(), positions: tuple[str, ...] = (), rules: dict[str, dict] | None = None):
+        super().__init__(iterable)
+        self.positions: tuple[str, ...] = positions
+        self.rules: dict[str, dict] = rules if rules is not None else {}
 
 
 @dataclass
@@ -25,7 +38,7 @@ class EditableWorker:
     """Representación mutable de un trabajador para la interfaz de edición."""
     name: str
     row_index: int
-    is_baja: bool
+    is_baja: bool = False
     skills: dict[str, str] = field(default_factory=dict)         # pos -> "" (no sabe), "X" (sabe), "V" (veto)
     preference_order: list[str] = field(default_factory=list)     # lista de puestos sabidos ordenados (1º a último)
 
@@ -81,9 +94,12 @@ def _col_idx_from_ref(ref: str) -> int:
     return idx - 1
 
 
-def load_editable_workers(xlsx_path: str | Path) -> list[EditableWorker]:
-    """Carga los trabajadores desde la hoja 'Trabajadores y Preferencias' del Excel."""
+def load_editable_workers(xlsx_path: str | Path) -> WorkerList:
+    """Carga los trabajadores desde la hoja 'Trabajadores y Preferencias' del Excel de forma dinámica."""
     path = Path(xlsx_path)
+    positions = parse_positions_from_header(path)
+    rules = parse_position_rules(path, positions)
+
     data = path.read_bytes()
     _, cells = _parse_xlsx_cells(data, sheet_name_contains="Trabajadores")
 
@@ -95,13 +111,15 @@ def load_editable_workers(xlsx_path: str | Path) -> list[EditableWorker]:
     col_name = 1
     col_baja = next((c for c in range(max_col + 1) if "BAJA" in str(cells.get((header_row, c)) or "").upper()), 2)
 
-    pos_cols = [c for c in range(max_col + 1) if str(cells.get((header_row, c)) or "").strip().upper() in POSITIONS]
-    if len(pos_cols) >= 32:
-        pos_cols_skills = {str(cells.get((header_row, c))).strip().upper(): c for c in pos_cols[:16]}
-        pos_cols_prefs = {str(cells.get((header_row, c))).strip().upper(): c for c in pos_cols[16:32]}
+    pos_cols = [c for c in range(max_col + 1) if str(cells.get((header_row, c)) or "").strip().upper() in positions]
+    k = len(positions)
+    if len(pos_cols) >= 2 * k:
+        pos_cols_skills = {str(cells.get((header_row, c))).strip().upper(): c for c in pos_cols[:k]}
+        pos_cols_prefs = {str(cells.get((header_row, c))).strip().upper(): c for c in pos_cols[k:2 * k]}
     else:
-        pos_cols_skills = {str(cells.get((header_row, c))).strip().upper(): c for c in pos_cols}
-        pos_cols_prefs = {}
+        offset = 1 if baja_col == 2 else 0
+        pos_cols_skills = {pos: 2 + offset + idx for idx, pos in enumerate(positions)}
+        pos_cols_prefs = {pos: 2 + offset + k + idx for idx, pos in enumerate(positions)}
 
     workers: list[EditableWorker] = []
 
@@ -118,7 +136,7 @@ def load_editable_workers(xlsx_path: str | Path) -> list[EditableWorker]:
         skills: dict[str, str] = {}
         raw_prefs: dict[str, int] = {}
 
-        for pos in POSITIONS:
+        for pos in positions:
             # Competencia
             c_skill = pos_cols_skills.get(pos)
             s_val = str(cells.get((r, c_skill)) or "").strip().upper() if c_skill is not None else ""
@@ -137,7 +155,7 @@ def load_editable_workers(xlsx_path: str | Path) -> list[EditableWorker]:
                     raw_prefs[pos] = int(p_val)
 
         # Ordenar lista de preferencias para los puestos sabidos ('X')
-        known_positions = [pos for pos in POSITIONS if skills[pos] == "X"]
+        known_positions = [pos for pos in positions if skills.get(pos) == "X"]
         known_with_rank = sorted(
             [pos for pos in known_positions if pos in raw_prefs],
             key=lambda p: raw_prefs[p],
@@ -153,18 +171,28 @@ def load_editable_workers(xlsx_path: str | Path) -> list[EditableWorker]:
             preference_order=preference_order,
         ))
 
-    return workers
+    return WorkerList(workers, positions=positions, rules=rules)
 
 
-def save_editable_workers(xlsx_path: str | Path, workers: list[EditableWorker]) -> None:
-    """Guarda las modificaciones exclusivamente en 'Plantilla_Conocimientos_y_Preferencias.xlsx'.
+def save_editable_workers(
+    xlsx_path: str | Path,
+    workers: list[EditableWorker],
+    positions: tuple[str, ...] | None = None,
+    rules: dict[str, dict] | None = None,
+) -> None:
+    """Guarda las modificaciones en 'Plantilla_Conocimientos_y_Preferencias.xlsx'.
 
-    Crea una copia de seguridad previa (.bak) y solo modifica las celdas de BAJA,
-    competencias y orden de preferencia de los trabajadores usando la biblioteca estándar.
+    Reconstruye de forma limpia las filas de trabajadores y cabeceras dinámicas
+    usando la biblioteca estándar de Python sin requerir openpyxl.
     """
     path = Path(xlsx_path)
     if not path.exists():
         raise FileNotFoundError(f"No se encontró el archivo de plantilla en: {path}")
+
+    if positions is None:
+        positions = getattr(workers, "positions", None) or parse_positions_from_header(path)
+    if rules is None:
+        rules = getattr(workers, "rules", None) or parse_position_rules(path, positions)
 
     # Copia de seguridad automática previa
     backup_path = path.with_suffix(".xlsx.bak")
@@ -174,73 +202,29 @@ def save_editable_workers(xlsx_path: str | Path, workers: list[EditableWorker]) 
     with zipfile.ZipFile(path, "r") as zin:
         files = {name: zin.read(name) for name in zin.namelist()}
 
-    # Localizar la hoja de trabajadores en workbook.xml y su relación
     wb_root = ET.fromstring(files["xl/workbook.xml"])
     rels_root = ET.fromstring(files["xl/_rels/workbook.xml.rels"])
 
-    sheet_r_id = None
-    for sheet_el in wb_root.findall(f".//{{{MAIN}}}sheet"):
-        s_name = sheet_el.attrib.get("name", "").lower()
-        if "trabajador" in s_name or "preferencia" in s_name:
-            sheet_r_id = sheet_el.attrib.get(f"{{{REL}}}id")
-            break
-    if not sheet_r_id:
-        sheet_el = wb_root.find(f".//{{{MAIN}}}sheet")
-        if sheet_el is not None:
-            sheet_r_id = sheet_el.attrib.get(f"{{{REL}}}id")
-
-    sheet_target = "worksheets/sheet1.xml"
-    if sheet_r_id:
-        for rel_el in rels_root.findall(".//*[@Id]"):
-            if rel_el.attrib.get("Id") == sheet_r_id:
-                sheet_target = rel_el.attrib.get("Target", sheet_target).lstrip("/")
+    def _resolve_sheet_path(name_part: str, default_target: str) -> str:
+        s_id = None
+        for sheet_el in wb_root.findall(f".//{{{MAIN}}}sheet"):
+            if name_part in sheet_el.attrib.get("name", "").lower():
+                s_id = sheet_el.attrib.get(f"{{{REL}}}id")
                 break
+        if not s_id:
+            return default_target
+        for rel_el in rels_root.findall(".//*[@Id]"):
+            if rel_el.attrib.get("Id") == s_id:
+                tgt = rel_el.attrib.get("Target", default_target).lstrip("/")
+                return f"xl/{tgt}" if not tgt.startswith("xl/") else tgt
+        return default_target
 
-    sheet_path = f"xl/{sheet_target}" if not sheet_target.startswith("xl/") else sheet_target
-    if sheet_path not in files:
-        sheet_path = "xl/worksheets/sheet1.xml"
+    sheet1_path = _resolve_sheet_path("trabajador", "xl/worksheets/sheet1.xml")
+    sheet2_path = _resolve_sheet_path("guía", "xl/worksheets/sheet2.xml")
+    if sheet2_path not in files:
+        sheet2_path = _resolve_sheet_path("reglas", "xl/worksheets/sheet2.xml")
 
     ET.register_namespace("", MAIN)
-    sheet_root = ET.fromstring(files[sheet_path])
-    sheet_data = sheet_root.find(f"{{{MAIN}}}sheetData")
-    if sheet_data is None:
-        raise ValueError(f"No se encontró el elemento sheetData en {sheet_path}")
-
-    # Identificar columnas en la fila de cabecera (Fila 3 de Excel)
-    header_row_el = sheet_data.find(f"{{{MAIN}}}row[@r='3']")
-    col_name = 1
-    col_baja = 2
-    pos_cols_skills: dict[str, int] = {}
-    pos_cols_prefs: dict[str, int] = {}
-
-    if header_row_el is not None:
-        for c_el in header_row_el.findall(f"{{{MAIN}}}c"):
-            ref = c_el.attrib.get("r", "")
-            c_idx = _col_idx_from_ref(ref)
-            val = "".join(c_el.itertext()).strip().upper()
-            if "BAJA" in val:
-                col_baja = c_idx
-            elif val in POSITIONS:
-                if val not in pos_cols_skills:
-                    pos_cols_skills[val] = c_idx
-                elif val not in pos_cols_prefs:
-                    pos_cols_prefs[val] = c_idx
-
-    # Si no se detectaron preferencias como segundo bloque, deducir por offset
-    if not pos_cols_prefs and pos_cols_skills:
-        pos_cols_prefs = {pos: idx + 16 for pos, idx in pos_cols_skills.items()}
-
-    # Indexar filas por nombre de trabajador
-    row_elems_by_name = {}
-    for r_el in sheet_data.findall(f"{{{MAIN}}}row"):
-        r_num = int(r_el.attrib.get("r", 0))
-        if r_num < 4:
-            continue
-        c_name_el = r_el.find(f"{{{MAIN}}}c[@r='{_col_letter(col_name)}{r_num}']")
-        if c_name_el is not None:
-            n = "".join(c_name_el.itertext()).strip().upper()
-            if n:
-                row_elems_by_name[n] = r_el
 
     def _set_cell(row_el: ET.Element, c_idx: int, r_1_based: int, val: str | int | None) -> None:
         ref = _col_letter(c_idx) + str(r_1_based)
@@ -264,41 +248,109 @@ def save_editable_workers(xlsx_path: str | Path, workers: list[EditableWorker]) 
             t_elem = ET.SubElement(is_elem, f"{{{MAIN}}}t")
             t_elem.text = str(val)
 
-    for w in workers:
-        r_el = row_elems_by_name.get(w.name.strip().upper())
-        if r_el is None:
-            r_el = sheet_data.find(f"{{{MAIN}}}row[@r='{w.row_index}']")
-        if r_el is None:
-            continue
-        r_num = int(r_el.attrib.get("r", w.row_index))
+    # 1. Actualizar Hoja 1 (Trabajadores y Preferencias)
+    if sheet1_path in files:
+        sheet_root = ET.fromstring(files[sheet1_path])
+        sheet_data = sheet_root.find(f"{{{MAIN}}}sheetData")
+        if sheet_data is not None:
+            # Cabecera Fila 3
+            hdr_el = sheet_data.find(f"{{{MAIN}}}row[@r='3']")
+            if hdr_el is None:
+                hdr_el = ET.SubElement(sheet_data, f"{{{MAIN}}}row", {"r": "3", "ht": "26", "customHeight": "1", "s": "16"})
 
-        # 1. Columna BAJA
-        _set_cell(r_el, col_baja, r_num, "X" if w.is_baja else None)
+            _set_cell(hdr_el, 0, 3, "N.º")
+            _set_cell(hdr_el, 1, 3, "Apellidos y Nombre")
+            _set_cell(hdr_el, 2, 3, "BAJA")
+            for i, p in enumerate(positions):
+                _set_cell(hdr_el, 3 + i, 3, p)
+            for i, p in enumerate(positions):
+                _set_cell(hdr_el, 3 + len(positions) + i, 3, p)
 
-        # 2. Competencias
-        for pos in POSITIONS:
-            c_skill = pos_cols_skills.get(pos)
-            if c_skill is not None:
-                st = w.skills.get(pos, "")
-                _set_cell(r_el, c_skill, r_num, st if st in ("X", "V") else None)
+            # Limpiar celdas sobrantes en fila 3 si se redujeron puestos
+            max_hdr_col = 3 + 2 * len(positions)
+            for c in list(hdr_el):
+                if _col_idx_from_ref(c.attrib.get("r", "A1")) >= max_hdr_col:
+                    hdr_el.remove(c)
+            hdr_el[:] = sorted(hdr_el, key=lambda c: _col_idx_from_ref(c.attrib.get("r", "A1")))
 
-        # 3. Preferencias
-        for pos in POSITIONS:
-            c_pref = pos_cols_prefs.get(pos)
-            if c_pref is not None:
-                if w.knows_position(pos) and pos in w.preference_order:
-                    rank = w.preference_order.index(pos) + 1
-                    _set_cell(r_el, c_pref, r_num, rank)
+            # Limpiar filas previas de trabajadores (r >= 4)
+            for r_el in list(sheet_data):
+                if int(r_el.attrib.get("r", 0)) >= 4:
+                    sheet_data.remove(r_el)
+
+            # Reconstruir filas de trabajadores de forma ordenada
+            for idx, w in enumerate(workers, 1):
+                r_num = 3 + idx
+                w.row_index = r_num
+                r_el = ET.SubElement(sheet_data, f"{{{MAIN}}}row", {"r": str(r_num), "ht": "24", "customHeight": "1", "s": "16"})
+                _set_cell(r_el, 0, r_num, idx)
+                _set_cell(r_el, 1, r_num, w.name)
+                _set_cell(r_el, 2, r_num, "X" if w.is_baja else None)
+
+                for i, p in enumerate(positions):
+                    st = w.skills.get(p, "")
+                    _set_cell(r_el, 3 + i, r_num, st if st in ("X", "V") else None)
+
+                for i, p in enumerate(positions):
+                    if w.knows_position(p) and p in w.preference_order:
+                        rank = w.preference_order.index(p) + 1
+                        _set_cell(r_el, 3 + len(positions) + i, r_num, rank)
+
+                r_el[:] = sorted(r_el, key=lambda c: _col_idx_from_ref(c.attrib.get("r", "A1")))
+
+            # Actualizar dimensión
+            dim = sheet_root.find(f"{{{MAIN}}}dimension")
+            if dim is not None:
+                dim.set("ref", f"A1:{_col_letter(2 + 2 * len(positions))}{3 + len(workers)}")
+
+            files[sheet1_path] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
+
+    # 2. Actualizar Hoja 2 (Guía de Puestos y Reglas) si existe
+    if sheet2_path in files and rules:
+        s2_root = ET.fromstring(files[sheet2_path])
+        s2_data = s2_root.find(f"{{{MAIN}}}sheetData")
+        if s2_data is not None:
+            # Eliminar filas antiguas de catálogo (r entre 4 y 19)
+            for r_el in list(s2_data):
+                r_n = int(r_el.attrib.get("r", 0))
+                if 4 <= r_n <= 19:
+                    s2_data.remove(r_el)
+
+            for idx, p in enumerate(positions, 1):
+                r_num = 3 + idx
+                r_el = ET.SubElement(s2_data, f"{{{MAIN}}}row", {"r": str(r_num), "ht": "24", "customHeight": "1", "s": "16"})
+                r_info = rules.get(p, {})
+                name = r_info.get("name", p)
+                tm = r_info.get("target_m", 1)
+                tt = r_info.get("target_t", 1)
+                mm = r_info.get("min_m", tm)
+                mt = r_info.get("min_t", tt)
+                prio = r_info.get("priority", 0)
+
+                if p == "O" and tm == 0 and tt == 0:
+                    tgt_str = "1 M (M-J) / 1 T (V)"
+                    crit_str = "Martes y Jueves Mañana; Viernes Tarde"
                 else:
-                    _set_cell(r_el, c_pref, r_num, None)
+                    tgt_str = f"{tm} M / {tt} T"
+                    if mm == tm and mt == tt and prio == 0:
+                        crit_str = "Estricto"
+                    elif prio == 2:
+                        crit_str = f"Tarde reducible (a {mt} T) después de reducción 1"
+                    elif prio == 1:
+                        crit_str = f"Puesto reducible si falta personal (hasta {mm} M / {mt} T)"
+                    else:
+                        crit_str = f"Reducible (hasta {mm} M / {mt} T)"
 
-        # Ordenar celdas por columna para estricta conformidad OpenXML
-        r_el[:] = sorted(r_el, key=lambda c: _col_idx_from_ref(c.attrib.get("r", "A1")))
+                _set_cell(r_el, 0, r_num, p)
+                _set_cell(r_el, 1, r_num, name)
+                _set_cell(r_el, 2, r_num, tgt_str)
+                _set_cell(r_el, 3, r_num, crit_str)
+                r_el[:] = sorted(r_el, key=lambda c: _col_idx_from_ref(c.attrib.get("r", "A1")))
 
-    # Guardar XML actualizado en el mapa de archivos
-    files[sheet_path] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
+            s2_data[:] = sorted(s2_data, key=lambda r: int(r.attrib.get("r", 0)))
+            files[sheet2_path] = ET.tostring(s2_root, encoding="utf-8", xml_declaration=True)
 
-    # Escribir de forma atómica el nuevo XLSX
+    # Guardar en archivo temporal y sustituir atómicamente
     temp_path = path.with_suffix(".tmp")
     with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
         for name, data in files.items():

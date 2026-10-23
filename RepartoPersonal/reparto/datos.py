@@ -18,44 +18,183 @@ import re
 from xml.etree.ElementTree import fromstring
 from zipfile import ZipFile
 
-# Catálogo oficial de puestos y dotaciones base en laborables
-POSITIONS = (
+# Catálogo oficial de puestos y dotaciones base en laborables (por defecto)
+DEFAULT_POSITIONS = (
     "EC", "MG", "PU", "DR", "UR", "A",
     "RM1", "RM2", "RM3", "TC1", "TC2", "TC3", "TCU",
     "TE", "RT", "O"
 )
+POSITIONS = DEFAULT_POSITIONS
 
 # Dotaciones objetivo en días laborables estándar
 # Formato: (Mañana_Objetivo, Tarde_Objetivo, Mañana_Minimo, Tarde_Minimo)
-POSITION_RULES = {
-    "EC":  {"target_m": 4, "target_t": 2, "min_m": 3, "min_t": 1, "priority": 1},  # Reducción 1: EC
-    "MG":  {"target_m": 2, "target_t": 1, "min_m": 2, "min_t": 1, "priority": 0},  # Estricto
-    "PU":  {"target_m": 1, "target_t": 0, "min_m": 1, "min_t": 0, "priority": 0},  # Estricto mañana
-    "DR":  {"target_m": 3, "target_t": 3, "min_m": 3, "min_t": 2, "priority": 2},  # Reducción 2: DR tarde
-    "UR":  {"target_m": 2, "target_t": 2, "min_m": 2, "min_t": 2, "priority": 0},  # Estricto
-    "A":   {"target_m": 2, "target_t": 0, "min_m": 2, "min_t": 0, "priority": 0},  # Estricto mañana
-    "RM1": {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0},
-    "RM2": {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0},
-    "RM3": {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0},
-    "TC1": {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0},
-    "TC2": {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0},
-    "TC3": {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0},
-    "TCU": {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0},
-    "TE":  {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0},
-    "RT":  {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0},
+DEFAULT_POSITION_RULES = {
+    "EC":  {"target_m": 4, "target_t": 2, "min_m": 3, "min_t": 1, "priority": 1, "name": "Ecosonografía"},
+    "MG":  {"target_m": 2, "target_t": 1, "min_m": 2, "min_t": 1, "priority": 0, "name": "Mamografía"},
+    "PU":  {"target_m": 1, "target_t": 0, "min_m": 1, "min_t": 0, "priority": 0, "name": "Punción / Eco Especial"},
+    "DR":  {"target_m": 3, "target_t": 3, "min_m": 3, "min_t": 2, "priority": 2, "name": "Radiología Digital General"},
+    "UR":  {"target_m": 2, "target_t": 2, "min_m": 2, "min_t": 2, "priority": 0, "name": "Urgencias"},
+    "A":   {"target_m": 2, "target_t": 0, "min_m": 2, "min_t": 0, "priority": 0, "name": "Angiografía / Intervencionismo"},
+    "RM1": {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0, "name": "Resonancia Magnética 1"},
+    "RM2": {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0, "name": "Resonancia Magnética 2"},
+    "RM3": {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0, "name": "Resonancia Magnética 3"},
+    "TC1": {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0, "name": "Tomografía Computarizada 1"},
+    "TC2": {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0, "name": "Tomografía Computarizada 2"},
+    "TC3": {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0, "name": "Tomografía Computarizada 3"},
+    "TCU": {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0, "name": "TC Urgencias"},
+    "TE":  {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0, "name": "Telemando"},
+    "RT":  {"target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0, "name": "Radioterapia / Radiología"},
     # O (Quirófano/Otros): Se modula según día de semana (Martes y Jueves mañana; Viernes tarde)
-    "O":   {"target_m": 0, "target_t": 0, "min_m": 0, "min_t": 0, "priority": 0},
+    "O":   {"target_m": 0, "target_t": 0, "min_m": 0, "min_t": 0, "priority": 0, "name": "Quirófano / Otros"},
 }
+POSITION_RULES = DEFAULT_POSITION_RULES
 
 
-def get_position_targets(pos: str, weekday: int) -> tuple[int, int, int, int]:
+def parse_positions_from_header(xlsx_path: str | Path) -> tuple[str, ...]:
+    """Detecta dinámicamente el catálogo de puestos desde la cabecera (Fila 3) de la plantilla.
+
+    Lee secuencialmente las columnas tras 'BAJA'. El primer bloque de códigos no vacíos
+    hasta que un código se repite (inicio del bloque de preferencias) o se acaben las columnas
+    define el catálogo de puestos. Si el archivo no existe o no define puestos, recurre a DEFAULT_POSITIONS.
+    """
+    path = Path(xlsx_path)
+    if not path.exists():
+        return DEFAULT_POSITIONS
+    try:
+        data = path.read_bytes()
+        _, cells = _parse_xlsx_cells(data, sheet_name_contains="Trabajadores")
+        header_row = 2  # Fila 3 en Excel (0-indexed 2)
+        max_col = max((c for r, c in cells if r == header_row), default=0)
+
+        # Localizar columna BAJA o empezar tras columna B (índice 1)
+        baja_col = next((c for c in range(max_col + 1) if "BAJA" in str(cells.get((header_row, c)) or "").upper()), 2)
+
+        positions: list[str] = []
+        for c in range(baja_col + 1, max_col + 1):
+            val = str(cells.get((header_row, c)) or "").strip()
+            if not val:
+                continue
+            code = val.upper()
+            if code in positions:
+                # Comienza el segundo bloque (preferencias)
+                break
+            positions.append(code)
+
+        if positions:
+            return tuple(positions)
+    except Exception:
+        pass
+    return DEFAULT_POSITIONS
+
+
+def parse_position_rules(
+    xlsx_path: str | Path,
+    positions: tuple[str, ...] | None = None
+) -> dict[str, dict]:
+    """Lee las dotaciones objetivo, mínimos y criterios de reducción desde la Hoja 2.
+
+    Si no existe la Hoja 2 o faltan puestos, aplica valores por defecto inteligentes.
+    """
+    path = Path(xlsx_path)
+    if positions is None:
+        positions = parse_positions_from_header(path)
+
+    rules = {}
+    if path.exists():
+        try:
+            data = path.read_bytes()
+            sname, cells = _parse_xlsx_cells(data, sheet_name_contains="Guía")
+            if not cells:
+                sname, cells = _parse_xlsx_cells(data, sheet_name_contains="Reglas")
+
+            max_r = max((r for r, c in cells), default=0)
+            for r in range(2, max_r + 1):
+                code_raw = cells.get((r, 0))
+                if not code_raw:
+                    continue
+                code = str(code_raw).strip().upper()
+                if not code or code in ("CÓDIGO", "CODIGO", "PUESTO", "TOTAL"):
+                    continue
+
+                name = str(cells.get((r, 1)) or code).strip()
+                target_str = str(cells.get((r, 2)) or "").strip()
+                crit_str = str(cells.get((r, 3)) or "").strip()
+
+                # Extraer objetivos
+                tm, tt = 1, 1
+                m_tgt = re.search(r"(\d+)\s*M", target_str, re.IGNORECASE)
+                t_tgt = re.search(r"(\d+)\s*T", target_str, re.IGNORECASE)
+                if m_tgt:
+                    tm = int(m_tgt.group(1))
+                if t_tgt:
+                    tt = int(t_tgt.group(1))
+
+                # Extraer mínimos
+                mm, mt = tm, tt
+                if "hasta" in crit_str.lower():
+                    m_min = re.search(r"hasta\s*(\d+)\s*M", crit_str, re.IGNORECASE)
+                    t_min = re.search(r"(\d+)\s*T", crit_str, re.IGNORECASE)
+                    if m_min:
+                        mm = int(m_min.group(1))
+                    if t_min:
+                        mt = int(t_min.group(1))
+                elif "tarde reducible" in crit_str.lower():
+                    t_red = re.search(r"a\s*(\d+)\s*T", crit_str, re.IGNORECASE)
+                    if t_red:
+                        mt = int(t_red.group(1))
+
+                # Extraer prioridad de reducción
+                prio = 0
+                if "después de" in crit_str.lower() or "despues de" in crit_str.lower():
+                    prio = 2
+                elif "reducible" in crit_str.lower():
+                    prio = 1
+
+                rules[code] = {
+                    "name": name,
+                    "target_m": tm,
+                    "target_t": tt,
+                    "min_m": mm,
+                    "min_t": mt,
+                    "priority": prio,
+                }
+        except Exception:
+            pass
+
+    # Asegurar que todos los puestos solicitados tienen reglas
+    final_rules = {}
+    for p in positions:
+        if p in rules:
+            final_rules[p] = rules[p]
+        elif p in DEFAULT_POSITION_RULES:
+            final_rules[p] = dict(DEFAULT_POSITION_RULES[p])
+        else:
+            final_rules[p] = {
+                "name": p,
+                "target_m": 1,
+                "target_t": 1,
+                "min_m": 1,
+                "min_t": 1,
+                "priority": 0,
+            }
+    return final_rules
+
+
+def get_position_targets(
+    pos: str,
+    weekday: int,
+    position_rules: dict[str, dict] | None = None
+) -> tuple[int, int, int, int]:
     """Devuelve (target_m, target_t, min_m, min_t) para un puesto y día de semana (0=Lunes..4=Viernes)."""
-    if pos == "O":
+    rules = position_rules if position_rules is not None else POSITION_RULES
+    if pos == "O" and rules.get("O", {}).get("target_m", 0) == 0:
         # O abre Martes(1) y Jueves(3) por la mañana; Viernes(4) por la tarde
         m = 1 if weekday in (1, 3) else 0
         t = 1 if weekday == 4 else 0
         return m, t, m, t
-    r = POSITION_RULES[pos]
+    r = rules.get(pos)
+    if not r:
+        return 1, 1, 1, 1
     return r["target_m"], r["target_t"], r["min_m"], r["min_t"]
 
 
@@ -298,7 +437,10 @@ def load_sequences(xlsx_path: str | Path, warnings: list[str] | None = None) -> 
     return sequences
 
 
-def load_skills_and_preferences(xlsx_path: str | Path) -> dict[str, dict]:
+def load_skills_and_preferences(
+    xlsx_path: str | Path,
+    positions: tuple[str, ...] | None = None
+) -> dict[str, dict]:
     """Carga los conocimientos, vetos y ranking de preferencias desde la plantilla.
 
     Conocimientos: 'X' = sabe el puesto; celda vacía = NO lo sabe. 'V' = veto expreso.
@@ -307,7 +449,11 @@ def load_skills_and_preferences(xlsx_path: str | Path) -> dict[str, dict]:
     Soporta columna 'BAJA' (si está marcada con 'X', baja=True).
     Devuelve: {nombre_normalizado: {"skills": set(), "vetoes": set(), "ranking": dict(), "baja": bool}}.
     """
-    data = Path(xlsx_path).read_bytes()
+    path = Path(xlsx_path)
+    if positions is None:
+        positions = parse_positions_from_header(path)
+
+    data = path.read_bytes()
     _, cells = _parse_xlsx_cells(data, sheet_name_contains="Trabajadores")
 
     profiles = {}
@@ -317,14 +463,15 @@ def load_skills_and_preferences(xlsx_path: str | Path) -> dict[str, dict]:
     # Identificar columnas en la fila de cabecera (fila 3 de Excel, índice 2)
     baja_col = next((c for c in range(max_col + 1) if "BAJA" in str(cells.get((2, c)) or "").upper()), None)
 
-    pos_cols = [c for c in range(max_col + 1) if str(cells.get((2, c)) or "").strip().upper() in POSITIONS]
-    if len(pos_cols) >= 32:
-        skills_cols = {str(cells.get((2, c))).strip().upper(): c for c in pos_cols[:16]}
-        prefs_cols = {str(cells.get((2, c))).strip().upper(): c for c in pos_cols[16:32]}
+    pos_cols = [c for c in range(max_col + 1) if str(cells.get((2, c)) or "").strip().upper() in positions]
+    k = len(positions)
+    if len(pos_cols) >= 2 * k:
+        skills_cols = {str(cells.get((2, c))).strip().upper(): c for c in pos_cols[:k]}
+        prefs_cols = {str(cells.get((2, c))).strip().upper(): c for c in pos_cols[k:2 * k]}
     else:
         offset = 1 if baja_col == 2 else 0
-        skills_cols = {pos: 2 + offset + idx for idx, pos in enumerate(POSITIONS)}
-        prefs_cols = {pos: 18 + offset + idx for idx, pos in enumerate(POSITIONS)}
+        skills_cols = {pos: 2 + offset + idx for idx, pos in enumerate(positions)}
+        prefs_cols = {pos: 2 + offset + k + idx for idx, pos in enumerate(positions)}
 
     for r in range(max_row + 1):
         name_val = cells.get((r, 1))  # Col B
@@ -360,7 +507,7 @@ def load_skills_and_preferences(xlsx_path: str | Path) -> dict[str, dict]:
 
         # Puestos sabidos sin número de preferencia: a continuación del último ranking
         next_rank = max(ranking.values(), default=0)
-        for pos in POSITIONS:
+        for pos in positions:
             if pos in skills and pos not in ranking:
                 next_rank += 1
                 ranking[pos] = next_rank
@@ -376,12 +523,17 @@ def load_skills_and_preferences(xlsx_path: str | Path) -> dict[str, dict]:
 
 
 def load_all_workers_with_report(
-    sequences_path: str | Path, preferences_path: str | Path
+    sequences_path: str | Path,
+    preferences_path: str | Path,
+    positions: tuple[str, ...] | None = None,
 ) -> tuple[tuple[WorkerProfile, ...], LoadReport]:
     """Combina secuencias y ficha en perfiles inmutables e informa de lo que requiere revisión."""
+    if positions is None:
+        positions = parse_positions_from_header(preferences_path)
+
     warnings: list[str] = []
     seqs = load_sequences(sequences_path, warnings)
-    prefs = load_skills_and_preferences(preferences_path)
+    prefs = load_skills_and_preferences(preferences_path, positions=positions)
 
     workers = []
     bajas = []
@@ -442,9 +594,13 @@ def load_all_workers_with_report(
     return tuple(workers), report
 
 
-def load_all_workers(sequences_path: str | Path, preferences_path: str | Path) -> tuple[WorkerProfile, ...]:
+def load_all_workers(
+    sequences_path: str | Path,
+    preferences_path: str | Path,
+    positions: tuple[str, ...] | None = None,
+) -> tuple[WorkerProfile, ...]:
     """Combina secuencias de turnos y ficha de conocimientos en perfiles completos e inmutables."""
-    return load_all_workers_with_report(sequences_path, preferences_path)[0]
+    return load_all_workers_with_report(sequences_path, preferences_path, positions=positions)[0]
 
 
 # --- CICLO Y PROYECCIÓN MENSUAL ---
@@ -501,7 +657,9 @@ def project_month(
     year: int,
     month: int,
     start_cycle_day: int,
-    workers: tuple[WorkerProfile, ...]
+    workers: tuple[WorkerProfile, ...],
+    positions: tuple[str, ...] | None = None,
+    position_rules: dict[str, dict] | None = None,
 ) -> tuple[DaySchedule, ...]:
     """Genera el calendario diario proyectado del mes solicitado a partir del día del ciclo asignado al día 1."""
     if not (1 <= start_cycle_day <= CYCLE_LENGTH):
@@ -511,6 +669,9 @@ def project_month(
             f"El día de ciclo {start_cycle_day} no coincide con el día de la semana del 1/{month}/{year}: "
             f"el ciclo empieza en lunes. Valores compatibles: {valid_cycle_days(year, month)}"
         )
+
+    active_positions = positions if positions is not None else POSITIONS
+    active_rules = position_rules if position_rules is not None else POSITION_RULES
 
     start_date = date(year, month, 1)
     # Último día del mes
@@ -548,8 +709,8 @@ def project_month(
         targets_t = {}
         if is_workday_flag:
             wd = curr.weekday()
-            for pos in POSITIONS:
-                tm, tt, mm, mt = get_position_targets(pos, wd)
+            for pos in active_positions:
+                tm, tt, mm, mt = get_position_targets(pos, wd, active_rules)
                 targets_m[pos] = (tm, mm)
                 targets_t[pos] = (tt, mt)
 

@@ -73,7 +73,9 @@ def solve_month(
     month: int,
     schedules: tuple[DaySchedule, ...],
     workers: tuple[WorkerProfile, ...],
-    time_limit_seconds: float = 15.0
+    positions: tuple[str, ...] | None = None,
+    position_rules: dict[str, dict] | None = None,
+    time_limit_seconds: float = 15.0,
 ) -> MonthResult:
     """Resuelve la asignación mensual óptima para todos los días laborables proyectados."""
     start_time = perf_counter()
@@ -81,6 +83,13 @@ def solve_month(
 
     workers_by_id = {w.id: w for w in workers}
     workdays = [s for s in schedules if s.is_workday]
+
+    active_positions = (
+        positions
+        if positions is not None
+        else (tuple(schedules[0].targets_m.keys()) if schedules and schedules[0].targets_m else POSITIONS)
+    )
+    active_rules = position_rules if position_rules is not None else {}
 
     if not workdays:
         return MonthResult(
@@ -122,7 +131,7 @@ def solve_month(
         # 1. Definir presencia y opciones de turno para trabajadores fijos de M
         for wid in s.workers_m:
             w = workers_by_id[wid]
-            for pos in POSITIONS:
+            for pos in active_positions:
                 if pos in w.skills and pos not in w.vetoes:
                     var = model.new_bool_var(f"x_{d}_M_{wid}_{pos}")
                     x[d, "M", wid, pos] = var
@@ -139,7 +148,7 @@ def solve_month(
         # 2. Definir presencia y opciones de turno para trabajadores fijos de T
         for wid in s.workers_t:
             w = workers_by_id[wid]
-            for pos in POSITIONS:
+            for pos in active_positions:
                 if pos in w.skills and pos not in w.vetoes:
                     var = model.new_bool_var(f"x_{d}_T_{wid}_{pos}")
                     x[d, "T", wid, pos] = var
@@ -161,7 +170,7 @@ def solve_month(
 
             # Opciones si entra de Mañana
             m_choices = []
-            for pos in POSITIONS:
+            for pos in active_positions:
                 if pos in w.skills and pos not in w.vetoes:
                     var = model.new_bool_var(f"x_{d}_M_{wid}_{pos}")
                     x[d, "M", wid, pos] = var
@@ -175,7 +184,7 @@ def solve_month(
 
             # Opciones si entra de Tarde
             t_choices = []
-            for pos in POSITIONS:
+            for pos in active_positions:
                 if pos in w.skills and pos not in w.vetoes:
                     var = model.new_bool_var(f"x_{d}_T_{wid}_{pos}")
                     x[d, "T", wid, pos] = var
@@ -198,7 +207,7 @@ def solve_month(
     # 4. Restricciones de Cobertura y Dotaciones por Puesto
     coverage_counts = {}
     vacancy_vars = []
-    dr_vacancy_vars = []
+    prio2_vacancy_vars = []
     min_deficit_vars = []
 
     for s in workdays:
@@ -225,21 +234,30 @@ def solve_month(
                     model.add(def_min >= mn - actual_count)
                     min_deficit_vars.append(def_min)
 
-                if pos == "DR":
-                    dr_vacancy_vars.append(vac)
+                prio = active_rules.get(pos, {}).get("priority", 0) if active_rules else (2 if pos == "DR" else (1 if pos == "EC" else 0))
+                if prio == 2 or (not active_rules and pos == "DR"):
+                    prio2_vacancy_vars.append(vac)
 
-                # Regla de reducción ordenada: DR tarde solo se reduce si EC tarde ya está en su mínimo o menor
-                if pos == "DR" and shift == "T" and (d, "T", "EC") in coverage_counts:
-                    ec_cnt = coverage_counts[d, "T", "EC"]
-                    ec_min = s.targets_t["EC"][1]
-                    reduced_dr = model.new_bool_var(f"red_dr_{d}")
-                    model.add(actual_count < tgt).only_enforce_if(reduced_dr)
-                    model.add(actual_count == tgt).only_enforce_if(reduced_dr.negated())
-                    model.add(ec_cnt <= ec_min).only_enforce_if(reduced_dr)
+                # Regla de reducción ordenada para cualquier puesto con prioridad 2:
+                # solo se reduce si los puestos con prioridad 1 ya están en su mínimo o menor
+                if prio == 2 or (not active_rules and pos == "DR" and shift == "T"):
+                    if active_rules:
+                        prio1_positions = [p for p in targets.keys() if active_rules.get(p, {}).get("priority", 0) == 1]
+                    else:
+                        prio1_positions = ["EC"] if (pos == "DR" and shift == "T" and "EC" in targets) else []
+
+                    for p1 in prio1_positions:
+                        if (d, shift, p1) in coverage_counts:
+                            p1_cnt = coverage_counts[d, shift, p1]
+                            p1_min = targets[p1][1]
+                            reduced_p2 = model.new_bool_var(f"red_{pos}_{d}_{shift}_{p1}")
+                            model.add(actual_count < tgt).only_enforce_if(reduced_p2)
+                            model.add(actual_count == tgt).only_enforce_if(reduced_p2.negated())
+                            model.add(p1_cnt <= p1_min).only_enforce_if(reduced_p2)
 
     total_min_deficits = sum(min_deficit_vars) if min_deficit_vars else 0
     total_vacancies = sum(vacancy_vars) if vacancy_vars else 0
-    total_dr_vacancies = sum(dr_vacancy_vars) if dr_vacancy_vars else 0
+    total_prio2_vacancies = sum(prio2_vacancy_vars) if prio2_vacancy_vars else 0
 
     # 5. Cálculo de Esfuerzo Individual y Equidad
     worker_days_count = {}
@@ -247,13 +265,16 @@ def solve_month(
         d_cnt = sum(1 for s in workdays if w.sequence[s.cycle_day - 1] in ("M", "T", "R"))
         worker_days_count[w.id] = d_cnt
 
+    k_positions = len(active_positions)
+    default_rank = max(1, k_positions // 2)
+
     worker_pts = {}
     for w in workers:
         d_cnt = worker_days_count[w.id]
         if d_cnt > 0:
-            pts_var = model.new_int_var(0, 16 * d_cnt, f"pts_{w.id}")
+            pts_var = model.new_int_var(0, k_positions * d_cnt, f"pts_{w.id}")
             terms = [
-                var * w.ranking.get(pos, 8)
+                var * w.ranking.get(pos, default_rank)
                 for var, pos in worker_assigned_terms[w.id]
             ]
             model.add(pts_var == sum(terms))
@@ -263,9 +284,9 @@ def solve_month(
     # Para evaluar con precisión decimal usando enteros en CP-SAT, escalamos por 100:
     # 100 * pts_i <= M_max_scaled * d_cnt
     # 100 * pts_i >= M_min_scaled * d_cnt
-    m_max_scaled = model.new_int_var(0, 1600, "M_max_scaled")
-    m_min_scaled = model.new_int_var(0, 1600, "M_min_scaled")
-    spread_scaled = model.new_int_var(0, 1600, "spread_scaled")
+    m_max_scaled = model.new_int_var(0, k_positions * 100, "M_max_scaled")
+    m_min_scaled = model.new_int_var(0, k_positions * 100, "M_min_scaled")
+    spread_scaled = model.new_int_var(0, k_positions * 100, "spread_scaled")
     model.add(spread_scaled == m_max_scaled - m_min_scaled)
 
     for wid, pts_var in worker_pts.items():
@@ -305,7 +326,7 @@ def solve_month(
 
     opt_min_deficits = 0
     opt_vacancies = 0
-    opt_dr_vacancies = 0
+    opt_prio2_vacancies = 0
     is_optimal = True
 
     # Fase 1: Minimizar déficit de mínimos y vacantes totales
@@ -338,15 +359,15 @@ def solve_month(
             issues=("Tiempo agotado sin encontrar solución factible.",),
         )
 
-    # Fase 2: Vacantes DR
-    model.minimize(total_dr_vacancies)
+    # Fase 2: Vacantes de puesto reducible secundario (DR en radiología / prioridad 2)
+    model.minimize(total_prio2_vacancies)
     solver.parameters.max_time_in_seconds = max(1.0, time_limit_seconds * 0.25)
     st2 = solver.solve(model)
     if st2 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        opt_dr_vacancies = int(solver.value(total_dr_vacancies))
+        opt_prio2_vacancies = int(solver.value(total_prio2_vacancies))
         if st2 != cp_model.OPTIMAL:
             is_optimal = False
-        model.add(total_dr_vacancies == opt_dr_vacancies)
+        model.add(total_prio2_vacancies == opt_prio2_vacancies)
 
     model.clear_hints()
     for v in x.values():
@@ -377,7 +398,7 @@ def solve_month(
     for (d, shift, wid, pos), var in x.items():
         if solver.value(var) == 1:
             w = workers_by_id[wid]
-            pts = 0 if pos == "." else w.ranking.get(pos, 8)
+            pts = 0 if pos == "." else w.ranking.get(pos, default_rank)
             asg = Assignment(
                 day=d,
                 shift=shift,
@@ -439,7 +460,7 @@ def solve_month(
         is_optimal=is_optimal,
         status_name=status_name,
         vacancies_total=len(vacancies),
-        vacancies_dr=opt_dr_vacancies,
+        vacancies_dr=opt_prio2_vacancies,
         effort_spread=round(spread, 2),
         max_mean_effort=round(max_mean, 2),
         min_mean_effort=round(min_mean, 2),
