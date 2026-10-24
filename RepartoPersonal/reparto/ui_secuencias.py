@@ -45,6 +45,7 @@ class SecuenciasWidget(QWidget):
     """Pestaña interactiva de ajuste y visualización de secuencias de turnos."""
 
     data_saved = Signal()
+    dirty_changed = Signal(bool)
 
     def __init__(self, seq_path: Path, parent=None):
         super().__init__(parent)
@@ -52,9 +53,20 @@ class SecuenciasWidget(QWidget):
         self.records: list[dict] = []
         self.cycle_weeks: int = 24
         self.cycle_days: int = 168
+        self.is_dirty: bool = False
 
         self._init_ui()
         self.load_data()
+
+    def _set_dirty(self, dirty: bool):
+        dirty = bool(dirty)
+        if self.is_dirty != dirty:
+            self.is_dirty = dirty
+            if hasattr(self, "save_btn"):
+                self.save_btn.setText(
+                    "💾 Guardar Cambios en Excel ●" if dirty else "💾 Guardar Cambios en Excel"
+                )
+            self.dirty_changed.emit(dirty)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -157,7 +169,7 @@ class SecuenciasWidget(QWidget):
                 border-color: #94A3B8;
             }
         """)
-        self.reload_btn.clicked.connect(self.load_data)
+        self.reload_btn.clicked.connect(self._on_reload_clicked)
         tools_row.addWidget(self.reload_btn)
 
         self.save_btn = QPushButton("💾 Guardar Cambios en Excel")
@@ -252,6 +264,20 @@ class SecuenciasWidget(QWidget):
         self.notification_lbl.setVisible(True)
         self._notif_timer.start(4000)
 
+    def _on_reload_clicked(self):
+        if self.is_dirty:
+            reply = QMessageBox.question(
+                self,
+                "Cambios sin guardar",
+                "Hay modificaciones sin guardar en la pestaña Secuencias de Turnos.\n"
+                "¿Desea descartarlas y recargar desde el archivo Excel?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        self.load_data()
+
     def load_data(self):
         """Carga los datos de secuencias desde el Excel y rellena la tabla."""
         if not self.seq_path.exists():
@@ -267,6 +293,7 @@ class SecuenciasWidget(QWidget):
             self.workers_badge.setText(f"👥 {len(self.records)} profesionales")
 
             self._populate_table()
+            self._set_dirty(False)
             self._show_notification("✔ Secuencias cargadas correctamente.")
         except Exception as e:
             self._show_notification(f"Error al cargar secuencias: {str(e)}", is_error=True)
@@ -414,7 +441,10 @@ class SecuenciasWidget(QWidget):
             if 0 <= row < len(self.records):
                 seq = self.records[row]["sequence"]
                 if d_idx < len(seq):
+                    prev = seq[d_idx]
                     seq[d_idx] = raw
+                    if prev != raw:
+                        self._set_dirty(True)
                 self._update_row_totals(row, self.records[row])
 
     def _on_search_changed(self, text: str):
@@ -431,15 +461,21 @@ class SecuenciasWidget(QWidget):
             matches = (query in name) or (query in num)
             self.table.setRowHidden(row, not matches)
 
-    def _on_save_clicked(self):
+    def save_data(self) -> bool:
         """Persiste los cambios de secuencias al archivo Excel."""
         if not self.seq_path.exists():
             QMessageBox.critical(self, "Error", f"No se encontró el archivo de secuencias: {self.seq_path}")
-            return
+            return False
 
         try:
             save_sequence_records(self.seq_path, self.records, cycle_weeks=self.cycle_weeks)
+            self._set_dirty(False)
             self._show_notification(f"✔ Cambios guardados con éxito en {self.seq_path.name}.")
             self.data_saved.emit()
+            return True
         except Exception as e:
             QMessageBox.critical(self, "Error al guardar", f"No se pudieron guardar las secuencias:\n{str(e)}")
+            return False
+
+    def _on_save_clicked(self):
+        self.save_data()

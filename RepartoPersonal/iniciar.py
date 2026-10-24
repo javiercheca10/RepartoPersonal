@@ -5,6 +5,7 @@ empaquetado en un ejecutable .exe con PyInstaller.
 Detecta automáticamente las carpetas 'configuracion' y 'resultados'.
 """
 
+from dataclasses import replace
 from datetime import date
 import os
 from pathlib import Path
@@ -42,7 +43,8 @@ from reparto.assets import get_app_icon, get_app_pixmap, setup_windows_app_id
 from reparto.datos import (
     cycle_day_matches_weekday,
     detect_cycle_weeks,
-    load_all_workers,
+    holidays_for_year,
+    load_all_workers_with_report,
     parse_positions_from_header,
     parse_position_rules,
     project_month,
@@ -92,7 +94,7 @@ class SolverWorkerThread(QThread):
             cycle_length = self.cycle_weeks * 7
             positions = parse_positions_from_header(self.pref_path)
             rules = parse_position_rules(self.pref_path, positions)
-            workers = load_all_workers(
+            workers, load_report = load_all_workers_with_report(
                 self.seq_path,
                 self.pref_path,
                 positions=positions,
@@ -127,6 +129,13 @@ class SolverWorkerThread(QThread):
                 )
                 return
 
+            extra_issues = list(load_report.warnings)
+            _, holidays_verified = holidays_for_year(self.year)
+            if not holidays_verified:
+                extra_issues.append(
+                    f"Los festivos de {self.year} se han calculado por regla general (revise festivos locales)."
+                )
+
             self.progress_signal.emit("Generando cuadrante Excel (.xlsx)...", 80)
             self.out_dir.mkdir(parents=True, exist_ok=True)
             month_name = MONTHS_ES[self.month - 1][0]
@@ -139,8 +148,13 @@ class SolverWorkerThread(QThread):
                 pdf_path = self.out_dir / f"Cuadrante_{month_name}_{self.year}.pdf"
                 export_month_to_pdf(result, schedules, workers, pdf_path, positions=positions)
                 pdf_str = str(pdf_path)
-            except Exception:
-                pass  # Si ocurre algún fallo imprevisto, se continúa con el Excel generado
+            except Exception as pdf_err:
+                extra_issues.append(
+                    f"No se pudo generar el PDF ({pdf_err}); el archivo Excel está completo."
+                )
+
+            if extra_issues:
+                result = replace(result, issues=tuple(extra_issues) + result.issues)
 
             self.progress_signal.emit("¡Cuadrante completado con éxito!", 100)
             self.finished_signal.emit(result, schedules, workers, str(excel_path), pdf_str)
@@ -317,9 +331,9 @@ class MainWindow(QMainWindow):
         year_lbl = QLabel("Año")
         year_lbl.setObjectName("fieldLabel")
         self.year_combo = QComboBox()
-        for y in range(2026, 2031):
+        for y in range(2025, 2036):
             self.year_combo.addItem(str(y), y)
-        self.year_combo.setCurrentText(str(today.year if today.year >= 2026 else 2026))
+        self.year_combo.setCurrentText(str(today.year if 2025 <= today.year <= 2035 else 2026))
         self.year_combo.currentIndexChanged.connect(self._on_period_changed)
         year_box.addWidget(year_lbl)
         year_box.addWidget(self.year_combo)
@@ -413,13 +427,19 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(plan_tab, "Planificación y Cuadrante")
 
         # --- PESTAÑA 2: TRABAJADORES ---
-        self.tab_trabajadores = TrabajadoresTab(self.pref_path)
+        self.tab_trabajadores = TrabajadoresTab(self.pref_path, seq_path=self.seq_path)
         self.tab_trabajadores.data_saved.connect(self._on_worker_data_saved)
+        self.tab_trabajadores.dirty_changed.connect(
+            lambda dirty: self.tab_widget.setTabText(1, "Trabajadores *" if dirty else "Trabajadores")
+        )
         self.tab_widget.addTab(self.tab_trabajadores, "Trabajadores")
 
         # --- PESTAÑA 3: SECUENCIAS DE TURNOS ---
         self.tab_secuencias = SecuenciasWidget(self.seq_path)
         self.tab_secuencias.data_saved.connect(self._on_sequence_data_saved)
+        self.tab_secuencias.dirty_changed.connect(
+            lambda dirty: self.tab_widget.setTabText(2, "Secuencias de Turnos *" if dirty else "Secuencias de Turnos")
+        )
         self.tab_widget.addTab(self.tab_secuencias, "Secuencias de Turnos")
 
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
@@ -695,9 +715,61 @@ class MainWindow(QMainWindow):
         if not (seq_ok and pref_ok):
             self.generate_btn.setEnabled(False)
             self.status_lbl.setText("Faltan archivos en la carpeta de configuración.")
+            self.status_lbl.setToolTip("")
         else:
             self.generate_btn.setEnabled(True)
-            self.status_lbl.setText("Listo para generar.")
+            try:
+                _, report = load_all_workers_with_report(self.seq_path, self.pref_path)
+                if report.warnings:
+                    self.status_lbl.setText(
+                        f"Listo para generar · {len(report.warnings)} aviso(s) en configuración (pase el ratón para ver)"
+                    )
+                    self.status_lbl.setToolTip("\n".join(f"• {w}" for w in report.warnings))
+                else:
+                    self.status_lbl.setText("Listo para generar.")
+                    self.status_lbl.setToolTip("")
+            except Exception:
+                self.status_lbl.setText("Listo para generar.")
+                self.status_lbl.setToolTip("")
+
+    def _prompt_save_unsaved_changes(self, action_desc: str) -> bool:
+        """Verifica si hay cambios sin guardar en Trabajadores o Secuencias antes de una acción crítica."""
+        dirty_tabs = []
+        if hasattr(self, "tab_trabajadores") and self.tab_trabajadores.is_dirty:
+            dirty_tabs.append("Trabajadores")
+        if hasattr(self, "tab_secuencias") and self.tab_secuencias.is_dirty:
+            dirty_tabs.append("Secuencias de Turnos")
+        if not dirty_tabs:
+            return True
+
+        tabs_str = " y ".join(dirty_tabs)
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setWindowTitle("Cambios sin guardar")
+        msg_box.setText(f"Hay cambios sin guardar en {tabs_str}.")
+        msg_box.setInformativeText(f"¿Desea guardarlos en Excel antes de {action_desc}?")
+        save_btn = msg_box.addButton("Guardar y continuar", QMessageBox.AcceptRole)
+        discard_btn = msg_box.addButton("Continuar sin guardar", QMessageBox.DestructiveRole)
+        cancel_btn = msg_box.addButton("Cancelar", QMessageBox.RejectRole)
+        msg_box.setDefaultButton(save_btn)
+        msg_box.exec()
+
+        clicked = msg_box.clickedButton()
+        if clicked == cancel_btn:
+            return False
+        if clicked == save_btn:
+            if hasattr(self, "tab_trabajadores") and self.tab_trabajadores.is_dirty:
+                if not self.tab_trabajadores.save_data():
+                    return False
+            if hasattr(self, "tab_secuencias") and self.tab_secuencias.is_dirty:
+                if not self.tab_secuencias.save_data():
+                    return False
+        elif clicked == discard_btn:
+            if hasattr(self, "tab_trabajadores") and self.tab_trabajadores.is_dirty:
+                self.tab_trabajadores.load_data()
+            if hasattr(self, "tab_secuencias") and self.tab_secuencias.is_dirty:
+                self.tab_secuencias.load_data()
+        return True
 
     def _on_period_changed(self):
         """Actualiza la sugerencia de día de ciclo al cambiar de mes o año."""
@@ -712,6 +784,9 @@ class MainWindow(QMainWindow):
                 self.cycle_combo.setCurrentIndex(idx)
 
     def _on_generate_clicked(self):
+        if not self._prompt_save_unsaved_changes("generar el cuadrante"):
+            return
+
         self.generate_btn.setEnabled(False)
         self.results_card.setVisible(False)
         self.progress_bar.setVisible(True)
@@ -830,6 +905,8 @@ class MainWindow(QMainWindow):
 
     def _on_worker_data_saved(self):
         self._check_config_files()
+        if hasattr(self, "tab_secuencias") and not self.tab_secuencias.is_dirty:
+            self.tab_secuencias.load_data()
 
     def _on_sequence_data_saved(self):
         self._check_config_files()
@@ -838,16 +915,24 @@ class MainWindow(QMainWindow):
         if index == 0:
             self._check_config_files()
         elif index == 1 and hasattr(self, "tab_trabajadores"):
-            self.tab_trabajadores.load_data()
+            if not self.tab_trabajadores.is_dirty:
+                self.tab_trabajadores.load_data()
         elif index == 2 and hasattr(self, "tab_secuencias"):
-            self.tab_secuencias.load_data()
+            if not self.tab_secuencias.is_dirty:
+                self.tab_secuencias.load_data()
+
+    def closeEvent(self, event):
+        if self._prompt_save_unsaved_changes("cerrar la aplicación"):
+            event.accept()
+        else:
+            event.ignore()
 
     def _open_config_folder(self):
         self._open_folder_path(self.config_dir)
         self._check_config_files()
-        if hasattr(self, "tab_trabajadores"):
+        if hasattr(self, "tab_trabajadores") and not self.tab_trabajadores.is_dirty:
             self.tab_trabajadores.load_data()
-        if hasattr(self, "tab_secuencias"):
+        if hasattr(self, "tab_secuencias") and not self.tab_secuencias.is_dirty:
             self.tab_secuencias.load_data()
 
     def _open_folder(self):

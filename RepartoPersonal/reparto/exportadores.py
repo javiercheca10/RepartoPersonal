@@ -206,6 +206,17 @@ STYLES_XML = f"""<?xml version="1.0" encoding="UTF-8"?>
 </styleSheet>"""
 
 
+def _format_shift_mark(position: str, shift: str) -> str:
+    """Formatea la marca de puesto y turno evitando ambigüedad cuando el código termina en T o es largo (A5)."""
+    if shift == "T":
+        if position == ".":
+            return ".t"
+        if len(position) > 3 or position.endswith(("T", "t")):
+            return f"{position}(T)"
+        return f"{position}t"
+    return "." if position == "." else position
+
+
 def _col_letter(col_idx: int) -> str:
     name = ""
     while col_idx:
@@ -353,11 +364,7 @@ def export_month_to_excel(
                 # Si es tarde, verde con 't' (e.g. ECt, .t). Si mañana, azul sin 't' (e.g. EC, .)
                 is_afternoon = any(a.shift == "T" for a in worker_asgs)
                 for a in worker_asgs:
-                    if a.shift == "T":
-                        mark = ".t" if a.position == "." else f"{a.position}t"
-                    else:
-                        mark = "." if a.position == "." else a.position
-                    parts.append(mark)
+                    parts.append(_format_shift_mark(a.position, a.shift))
 
                 cell_text = "/".join(parts)
                 style_cell = 7 if is_afternoon else 6
@@ -522,7 +529,20 @@ def export_month_to_excel(
             archive.writestr(f"xl/worksheets/sheet{idx}.xml", sheet_bytes)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(buffer.getvalue())
+    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    try:
+        tmp_path.write_bytes(buffer.getvalue())
+        tmp_path.replace(output_path)
+    except PermissionError as exc:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        raise PermissionError(
+            f"No se pudo guardar '{output_path.name}' porque está abierto en Microsoft Excel u otro programa. "
+            "Cierre el archivo e inténtelo de nuevo."
+        ) from exc
 
 
 def export_month_to_pdf(
@@ -539,7 +559,7 @@ def export_month_to_pdf(
     """
     try:
         from reportlab.lib import colors
-        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.pagesizes import A3, A4, landscape
         from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
         from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
@@ -552,12 +572,12 @@ def export_month_to_pdf(
         for a in result.assignments:
             asgs_by_worker_day[a.worker_id, a.day].append(a)
 
-        # Configuración de documento apaisado A4
-        # Márgenes estrechos para maximizar espacio
+        # Configuración de documento apaisado A4 (o A3 automáticamente si la plantilla supera 55 trabajadores)
+        base_page = A3 if len(workers) > 55 else A4
         margin = 12
         doc = SimpleDocTemplate(
             str(output_path),
-            pagesize=landscape(A4),
+            pagesize=landscape(base_page),
             leftMargin=margin,
             rightMargin=margin,
             topMargin=14,
@@ -592,7 +612,7 @@ def export_month_to_pdf(
 
         # Tabla del cuadrante
         # Col 0: Trabajador (~120 pt). Resto: 30 o 31 días repartidos en el ancho disponible (~700 pt)
-        page_width = landscape(A4)[0] - (2 * margin)  # ~817 pt
+        page_width = landscape(base_page)[0] - (2 * margin)
         col0_width = 115
         day_col_width = (page_width - col0_width) / num_days
 
@@ -620,11 +640,7 @@ def export_month_to_pdf(
                 else:
                     parts = []
                     for a in worker_asgs:
-                        if a.shift == "T":
-                            mark = ".t" if a.position == "." else f"{a.position}t"
-                        else:
-                            mark = "." if a.position == "." else a.position
-                        parts.append(mark)
+                        parts.append(_format_shift_mark(a.position, a.shift))
                     w_row.append("/".join(parts))
             table_data.append(w_row)
 
@@ -674,10 +690,12 @@ def export_month_to_pdf(
             ("FONTNAME", (0, 0), (-1, 1), "Helvetica-Bold"),
         ]
 
-        # Colorear texto de Domingo en fila 0
+        # Colorear texto de Domingo en fila 0 y sombrear festivos/fines de semana
         for idx, s in enumerate(schedules, 1):
             if s.weekday == 6:
                 t_style.append(("TEXTCOLOR", (idx, 0), (idx, 0), colors.HexColor("#DC2626")))
+            if not s.is_workday:
+                t_style.append(("BACKGROUND", (idx, 2), (idx, 1 + len(workers)), colors.HexColor("#F1F5F9")))
 
         # Colorear puestos: Azul mañana (#191BA4), Verde tarde (#00A933)
         for r_idx, w in enumerate(workers, 2):

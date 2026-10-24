@@ -30,6 +30,11 @@ def compilar():
         "--exclude-module=tests",
         "--exclude-module=unittest",
         "--exclude-module=pytest",
+        "--exclude-module=holidays",
+        "--exclude-module=openpyxl",
+        "--exclude-module=matplotlib",
+        "--exclude-module=scipy",
+        "--exclude-module=pandas",
         "--windowed",          # Sin ventana de consola negra
         "--onedir",            # Formato carpeta portable rápida
         f"--add-data={reparto_dir}{sep}reparto",

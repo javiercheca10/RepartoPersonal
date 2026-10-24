@@ -10,19 +10,25 @@ sin depender de paquetes externos como openpyxl.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-import shutil
 from xml.etree import ElementTree as ET
 import zipfile
 
+from reparto._xml_io import (
+    MAIN_NS as MAIN,
+    REL_NS as REL,
+    atomic_write_zip,
+    create_rotating_backup,
+    parse_xml_preserving_namespaces,
+    serialize_xml_preserving_namespaces,
+)
 from reparto.datos import (
     POSITIONS,
+    _col_idx_from_ref,
+    _col_letter,
     _parse_xlsx_cells,
     parse_positions_from_header,
     parse_position_rules,
 )
-
-MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
 class WorkerList(list):
@@ -76,24 +82,6 @@ class EditableWorker:
                 self.preference_order.remove(pos)
 
 
-def _col_letter(c_idx: int) -> str:
-    """Convierte un índice de columna 0-based en letras ('A', 'B', ..., 'AA')."""
-    res = ""
-    while c_idx >= 0:
-        res = chr(c_idx % 26 + ord("A")) + res
-        c_idx = c_idx // 26 - 1
-    return res
-
-
-def _col_idx_from_ref(ref: str) -> int:
-    """Convierte una referencia tipo 'C4' o 'AA12' en índice 0-based."""
-    idx = 0
-    for ch in ref:
-        if ch.isalpha():
-            idx = idx * 26 + (ord(ch.upper()) - ord("A") + 1)
-    return idx - 1
-
-
 def load_editable_workers(xlsx_path: str | Path) -> WorkerList:
     """Carga los trabajadores desde la hoja 'Trabajadores y Preferencias' del Excel de forma dinámica."""
     path = Path(xlsx_path)
@@ -117,7 +105,7 @@ def load_editable_workers(xlsx_path: str | Path) -> WorkerList:
         pos_cols_skills = {str(cells.get((header_row, c))).strip().upper(): c for c in pos_cols[:k]}
         pos_cols_prefs = {str(cells.get((header_row, c))).strip().upper(): c for c in pos_cols[k:2 * k]}
     else:
-        offset = 1 if baja_col == 2 else 0
+        offset = 1 if col_baja == 2 else 0
         pos_cols_skills = {pos: 2 + offset + idx for idx, pos in enumerate(positions)}
         pos_cols_prefs = {pos: 2 + offset + k + idx for idx, pos in enumerate(positions)}
 
@@ -174,6 +162,12 @@ def load_editable_workers(xlsx_path: str | Path) -> WorkerList:
     return WorkerList(workers, positions=positions, rules=rules)
 
 
+def _cell_text(c_el: ET.Element | None) -> str:
+    if c_el is None:
+        return ""
+    return "".join(t.text or "" for t in c_el.iter(f"{{{MAIN}}}t")).strip()
+
+
 def save_editable_workers(
     xlsx_path: str | Path,
     workers: list[EditableWorker],
@@ -182,8 +176,9 @@ def save_editable_workers(
 ) -> None:
     """Guarda las modificaciones en 'Plantilla_Conocimientos_y_Preferencias.xlsx'.
 
-    Reconstruye de forma limpia las filas de trabajadores y cabeceras dinámicas
-    usando la biblioteca estándar de Python sin requerir openpyxl.
+    Reconstruye de forma limpia las filas de trabajadores, cabeceras dinámicas
+    y columnas estructuradas de reglas en Hoja 2, preservando espacios de nombres
+    OpenXML, estilos de celda y bloques informativos.
     """
     path = Path(xlsx_path)
     if not path.exists():
@@ -194,9 +189,8 @@ def save_editable_workers(
     if rules is None:
         rules = getattr(workers, "rules", None) or parse_position_rules(path, positions)
 
-    # Copia de seguridad automática previa
-    backup_path = path.with_suffix(".xlsx.bak")
-    shutil.copy2(path, backup_path)
+    # Copia de seguridad inmediata (.bak) y rotativa con fecha (copias/)
+    create_rotating_backup(path)
 
     # Leer archivo XLSX existente
     with zipfile.ZipFile(path, "r") as zin:
@@ -224,21 +218,33 @@ def save_editable_workers(
     if sheet2_path not in files:
         sheet2_path = _resolve_sheet_path("reglas", "xl/worksheets/sheet2.xml")
 
-    ET.register_namespace("", MAIN)
-
-    def _set_cell(row_el: ET.Element, c_idx: int, r_1_based: int, val: str | int | None) -> None:
+    def _set_cell(
+        row_el: ET.Element,
+        c_idx: int,
+        r_1_based: int,
+        val: str | int | None,
+        style: str | None = None,
+    ) -> None:
         ref = _col_letter(c_idx) + str(r_1_based)
         c = row_el.find(f"{{{MAIN}}}c[@r='{ref}']")
         if c is None:
             if val is None or val == "":
+                if style is None:
+                    return
+                c = ET.SubElement(row_el, f"{{{MAIN}}}c", {"r": ref, "s": style})
                 return
-            c = ET.SubElement(row_el, f"{{{MAIN}}}c", {"r": ref})
+            attrs = {"r": ref}
+            if style is not None:
+                attrs["s"] = style
+            c = ET.SubElement(row_el, f"{{{MAIN}}}c", attrs)
+        elif style is not None and "s" not in c.attrib:
+            c.set("s", style)
         for ch in list(c):
             c.remove(ch)
         if val is None or val == "":
             c.attrib.pop("t", None)
             return
-        if isinstance(val, int):
+        if isinstance(val, int) and not isinstance(val, bool):
             c.set("t", "n")
             v = ET.SubElement(c, f"{{{MAIN}}}v")
             v.text = str(val)
@@ -250,21 +256,39 @@ def save_editable_workers(
 
     # 1. Actualizar Hoja 1 (Trabajadores y Preferencias)
     if sheet1_path in files:
-        sheet_root = ET.fromstring(files[sheet1_path])
+        sheet_root, ns_map1 = parse_xml_preserving_namespaces(files[sheet1_path])
         sheet_data = sheet_root.find(f"{{{MAIN}}}sheetData")
         if sheet_data is not None:
-            # Cabecera Fila 3
+            # Capturar estilos de cabecera (fila 3) y de primera fila de datos (fila 4)
             hdr_el = sheet_data.find(f"{{{MAIN}}}row[@r='3']")
             if hdr_el is None:
-                hdr_el = ET.SubElement(sheet_data, f"{{{MAIN}}}row", {"r": "3", "ht": "26", "customHeight": "1", "s": "16"})
+                hdr_el = ET.SubElement(
+                    sheet_data, f"{{{MAIN}}}row", {"r": "3", "ht": "26", "customHeight": "1", "s": "16"}
+                )
+            hdr_c0 = hdr_el.find(f"{{{MAIN}}}c[@r='A3']")
+            hdr_c3 = hdr_el.find(f"{{{MAIN}}}c[@r='D3']")
+            if hdr_c3 is None:
+                hdr_c3 = hdr_el.find(f"{{{MAIN}}}c[@r='C3']")
+            s_hdr_fixed = hdr_c0.attrib.get("s", "25") if hdr_c0 is not None else "25"
+            s_hdr_pos = hdr_c3.attrib.get("s", "19") if hdr_c3 is not None else "19"
 
-            _set_cell(hdr_el, 0, 3, "N.º")
-            _set_cell(hdr_el, 1, 3, "Apellidos y Nombre")
-            _set_cell(hdr_el, 2, 3, "BAJA")
+            tpl_r4 = sheet_data.find(f"{{{MAIN}}}row[@r='4']")
+            s_row = tpl_r4.attrib.get("s", "16") if tpl_r4 is not None else "16"
+            s_ht = tpl_r4.attrib.get("ht", "24") if tpl_r4 is not None else "24"
+            c_a4 = tpl_r4.find(f"{{{MAIN}}}c[@r='A4']") if tpl_r4 is not None else None
+            c_b4 = tpl_r4.find(f"{{{MAIN}}}c[@r='B4']") if tpl_r4 is not None else None
+            c_c4 = tpl_r4.find(f"{{{MAIN}}}c[@r='C4']") if tpl_r4 is not None else None
+            s_col_a = c_a4.attrib.get("s", "28") if c_a4 is not None else "28"
+            s_col_b = c_b4.attrib.get("s", "27") if c_b4 is not None else "27"
+            s_col_data = c_c4.attrib.get("s", "28") if c_c4 is not None else "28"
+
+            _set_cell(hdr_el, 0, 3, "N.º", style=s_hdr_fixed)
+            _set_cell(hdr_el, 1, 3, "Apellidos y Nombre", style=s_hdr_fixed)
+            _set_cell(hdr_el, 2, 3, "BAJA", style=s_hdr_pos)
             for i, p in enumerate(positions):
-                _set_cell(hdr_el, 3 + i, 3, p)
+                _set_cell(hdr_el, 3 + i, 3, p, style=s_hdr_pos)
             for i, p in enumerate(positions):
-                _set_cell(hdr_el, 3 + len(positions) + i, 3, p)
+                _set_cell(hdr_el, 3 + len(positions) + i, 3, p, style=s_hdr_pos)
 
             # Limpiar celdas sobrantes en fila 3 si se redujeron puestos
             max_hdr_col = 3 + 2 * len(positions)
@@ -278,54 +302,135 @@ def save_editable_workers(
                 if int(r_el.attrib.get("r", 0)) >= 4:
                     sheet_data.remove(r_el)
 
-            # Reconstruir filas de trabajadores de forma ordenada
+            # Reconstruir filas de trabajadores de forma ordenada y preservando estilos
             for idx, w in enumerate(workers, 1):
                 r_num = 3 + idx
                 w.row_index = r_num
-                r_el = ET.SubElement(sheet_data, f"{{{MAIN}}}row", {"r": str(r_num), "ht": "24", "customHeight": "1", "s": "16"})
-                _set_cell(r_el, 0, r_num, idx)
-                _set_cell(r_el, 1, r_num, w.name)
-                _set_cell(r_el, 2, r_num, "X" if w.is_baja else None)
+                r_el = ET.SubElement(
+                    sheet_data,
+                    f"{{{MAIN}}}row",
+                    {"r": str(r_num), "ht": s_ht, "customHeight": "1", "s": s_row},
+                )
+                _set_cell(r_el, 0, r_num, idx, style=s_col_a)
+                _set_cell(r_el, 1, r_num, w.name, style=s_col_b)
+                _set_cell(r_el, 2, r_num, "X" if w.is_baja else None, style=s_col_data)
 
                 for i, p in enumerate(positions):
                     st = w.skills.get(p, "")
-                    _set_cell(r_el, 3 + i, r_num, st if st in ("X", "V") else None)
+                    _set_cell(r_el, 3 + i, r_num, st if st in ("X", "V") else None, style=s_col_data)
 
                 for i, p in enumerate(positions):
                     if w.knows_position(p) and p in w.preference_order:
                         rank = w.preference_order.index(p) + 1
-                        _set_cell(r_el, 3 + len(positions) + i, r_num, rank)
+                        _set_cell(r_el, 3 + len(positions) + i, r_num, rank, style=s_col_data)
+                    else:
+                        _set_cell(r_el, 3 + len(positions) + i, r_num, None, style=s_col_data)
 
                 r_el[:] = sorted(r_el, key=lambda c: _col_idx_from_ref(c.attrib.get("r", "A1")))
 
             # Actualizar dimensión
             dim = sheet_root.find(f"{{{MAIN}}}dimension")
             if dim is not None:
-                dim.set("ref", f"A1:{_col_letter(2 + 2 * len(positions))}{3 + len(workers)}")
+                dim.set("ref", f"A1:{_col_letter(2 + 2 * len(positions))}{max(4, 3 + len(workers))}")
 
-            files[sheet1_path] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
+            files[sheet1_path] = serialize_xml_preserving_namespaces(sheet_root, ns_map1)
 
-    # 2. Actualizar Hoja 2 (Guía de Puestos y Reglas) si existe
+    # 2. Actualizar Hoja 2 (Guía de Puestos y Reglas) — crearla si no existe y hay reglas
+    if rules and sheet2_path not in files:
+        files[sheet2_path] = (
+            b'<?xml version="1.0" encoding="utf-8"?>'
+            b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            b'<sheetData>'
+            b'<row r="3"><c r="A3" t="inlineStr"><is><t>C\xc3\xb3digo</t></is></c>'
+            b'<c r="B3" t="inlineStr"><is><t>Denominaci\xc3\xb3n del Puesto</t></is></c>'
+            b'<c r="C3" t="inlineStr"><is><t>Dotaci\xc3\xb3n Objetivo (L-V)</t></is></c>'
+            b'<c r="D3" t="inlineStr"><is><t>Criterio / Prioridad de Reducci\xc3\xb3n</t></is></c></row>'
+            b'</sheetData></worksheet>'
+        )
+        if "xl/workbook.xml" in files and "xl/_rels/workbook.xml.rels" in files:
+            wb_root, wb_ns = parse_xml_preserving_namespaces(files["xl/workbook.xml"])
+            rels_root, rels_ns = parse_xml_preserving_namespaces(files["xl/_rels/workbook.xml.rels"])
+            REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+            R_ID_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            wb_ns.setdefault("r", R_ID_NS)
+            ET.SubElement(
+                rels_root,
+                f"{{{REL_NS}}}Relationship",
+                {
+                    "Id": "rIdSheet2Rules",
+                    "Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet",
+                    "Target": "worksheets/sheet2.xml",
+                },
+            )
+            sheets_el = wb_root.find(f"{{{MAIN}}}sheets")
+            if sheets_el is not None:
+                ET.SubElement(
+                    sheets_el,
+                    f"{{{MAIN}}}sheet",
+                    {"name": "Guía de Puestos y Reglas", "sheetId": "2", f"{{{R_ID_NS}}}id": "rIdSheet2Rules"},
+                )
+            files["xl/workbook.xml"] = serialize_xml_preserving_namespaces(wb_root, wb_ns)
+            files["xl/_rels/workbook.xml.rels"] = serialize_xml_preserving_namespaces(rels_root, rels_ns)
+        if "[Content_Types].xml" in files:
+            ct_root, ct_ns = parse_xml_preserving_namespaces(files["[Content_Types].xml"])
+            CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+            ET.SubElement(
+                ct_root,
+                f"{{{CT_NS}}}Override",
+                {
+                    "PartName": "/xl/worksheets/sheet2.xml",
+                    "ContentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml",
+                },
+            )
+            files["[Content_Types].xml"] = serialize_xml_preserving_namespaces(ct_root, ct_ns)
+
     if sheet2_path in files and rules:
-        s2_root = ET.fromstring(files[sheet2_path])
+        s2_root, ns_map2 = parse_xml_preserving_namespaces(files[sheet2_path])
         s2_data = s2_root.find(f"{{{MAIN}}}sheetData")
         if s2_data is not None:
-            # Eliminar filas antiguas de catálogo (r entre 4 y 19)
+            # Asegurar cabeceras explícitas en Fila 3 para persistencia sin pérdida (C2)
+            s2_hdr = s2_data.find(f"{{{MAIN}}}row[@r='3']")
+            if s2_hdr is not None:
+                c_a3 = s2_hdr.find(f"{{{MAIN}}}c[@r='A3']")
+                s_h2 = c_a3.attrib.get("s", "25") if c_a3 is not None else "25"
+                for offset, h_title in enumerate(("Obj. M", "Obj. T", "Mín. M", "Mín. T", "Prioridad")):
+                    _set_cell(s2_hdr, 4 + offset, 3, h_title, style=s_h2)
+                s2_hdr[:] = sorted(s2_hdr, key=lambda c: _col_idx_from_ref(c.attrib.get("r", "A1")))
+
+            tpl2_r4 = s2_data.find(f"{{{MAIN}}}row[@r='4']")
+            s2_c0 = tpl2_r4.find(f"{{{MAIN}}}c[@r='A4']") if tpl2_r4 is not None else None
+            s2_c1 = tpl2_r4.find(f"{{{MAIN}}}c[@r='B4']") if tpl2_r4 is not None else None
+            s2_center = s2_c0.attrib.get("s", "31") if s2_c0 is not None else "31"
+            s2_left = s2_c1.attrib.get("s", "30") if s2_c1 is not None else "30"
+
+            # Separar filas de catálogo respecto al bloque inferior ("CONCEPTOS CLAVE...")
+            footer_rows: list[ET.Element] = []
+            in_footer = False
+            old_legend_start = None
             for r_el in list(s2_data):
                 r_n = int(r_el.attrib.get("r", 0))
-                if 4 <= r_n <= 19:
-                    s2_data.remove(r_el)
+                if r_n < 4:
+                    continue
+                first_txt = _cell_text(r_el.find(f"{{{MAIN}}}c[@r='A{r_n}']"))
+                if not in_footer and (not first_txt or "CONCEPTOS CLAVE" in first_txt.upper()):
+                    in_footer = True
+                    old_legend_start = r_n
+                s2_data.remove(r_el)
+                if in_footer:
+                    footer_rows.append(r_el)
 
             for idx, p in enumerate(positions, 1):
                 r_num = 3 + idx
-                r_el = ET.SubElement(s2_data, f"{{{MAIN}}}row", {"r": str(r_num), "ht": "24", "customHeight": "1", "s": "16"})
+                r_el = ET.SubElement(
+                    s2_data, f"{{{MAIN}}}row", {"r": str(r_num), "ht": "24", "customHeight": "1", "s": "16"}
+                )
                 r_info = rules.get(p, {})
                 name = r_info.get("name", p)
-                tm = r_info.get("target_m", 1)
-                tt = r_info.get("target_t", 1)
-                mm = r_info.get("min_m", tm)
-                mt = r_info.get("min_t", tt)
-                prio = r_info.get("priority", 0)
+                tm = int(r_info.get("target_m", 1))
+                tt = int(r_info.get("target_t", 1))
+                mm = int(r_info.get("min_m", tm))
+                mt = int(r_info.get("min_t", tt))
+                prio = int(r_info.get("priority", 0))
 
                 if p == "O" and tm == 0 and tt == 0:
                     tgt_str = "1 M (M-J) / 1 T (V)"
@@ -335,24 +440,51 @@ def save_editable_workers(
                     if mm == tm and mt == tt and prio == 0:
                         crit_str = "Estricto"
                     elif prio == 2:
-                        crit_str = f"Tarde reducible (a {mt} T) después de reducción 1"
+                        crit_str = f"Reducible (hasta {mm} M / {mt} T) después de reducción 1"
                     elif prio == 1:
                         crit_str = f"Puesto reducible si falta personal (hasta {mm} M / {mt} T)"
                     else:
-                        crit_str = f"Reducible (hasta {mm} M / {mt} T)"
+                        crit_str = f"Estricto (mínimo {mm} M / {mt} T)"
 
-                _set_cell(r_el, 0, r_num, p)
-                _set_cell(r_el, 1, r_num, name)
-                _set_cell(r_el, 2, r_num, tgt_str)
-                _set_cell(r_el, 3, r_num, crit_str)
+                _set_cell(r_el, 0, r_num, p, style=s2_center)
+                _set_cell(r_el, 1, r_num, name, style=s2_left)
+                _set_cell(r_el, 2, r_num, tgt_str, style=s2_center)
+                _set_cell(r_el, 3, r_num, crit_str, style=s2_left)
+                # Columnas estructuradas exactas (E..I) para ida y vuelta sin pérdida
+                _set_cell(r_el, 4, r_num, tm, style=s2_center)
+                _set_cell(r_el, 5, r_num, tt, style=s2_center)
+                _set_cell(r_el, 6, r_num, mm, style=s2_center)
+                _set_cell(r_el, 7, r_num, mt, style=s2_center)
+                _set_cell(r_el, 8, r_num, prio, style=s2_center)
                 r_el[:] = sorted(r_el, key=lambda c: _col_idx_from_ref(c.attrib.get("r", "A1")))
 
-            s2_data[:] = sorted(s2_data, key=lambda r: int(r.attrib.get("r", 0)))
-            files[sheet2_path] = ET.tostring(s2_root, encoding="utf-8", xml_declaration=True)
+            # Reinsertar bloque informativo desplazado tras el último puesto
+            new_legend_start = 4 + len(positions)
+            delta = (new_legend_start - old_legend_start) if old_legend_start is not None else 0
+            for f_el in footer_rows:
+                old_r = int(f_el.attrib.get("r", 0))
+                new_r = old_r + delta
+                f_el.set("r", str(new_r))
+                for c_el in f_el.findall(f"{{{MAIN}}}c"):
+                    c_idx = _col_idx_from_ref(c_el.attrib.get("r", "A1"))
+                    c_el.set("r", f"{_col_letter(c_idx)}{new_r}")
+                s2_data.append(f_el)
 
-    # Guardar en archivo temporal y sustituir atómicamente
-    temp_path = path.with_suffix(".tmp")
-    with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
-        for name, data in files.items():
-            zout.writestr(name, data)
-    temp_path.replace(path)
+            # Desplazar mergeCells del bloque informativo si cambió el número de puestos
+            if delta != 0 and old_legend_start is not None:
+                merge_parent = s2_root.find(f"{{{MAIN}}}mergeCells")
+                if merge_parent is not None:
+                    import re as _re
+                    for mc_el in merge_parent.findall(f"{{{MAIN}}}mergeCell"):
+                        ref = mc_el.attrib.get("ref", "")
+                        m = _re.fullmatch(r"([A-Z]+)(\d+):([A-Z]+)(\d+)", ref)
+                        if m and int(m.group(2)) >= old_legend_start:
+                            r1 = int(m.group(2)) + delta
+                            r2 = int(m.group(4)) + delta
+                            mc_el.set("ref", f"{m.group(1)}{r1}:{m.group(3)}{r2}")
+
+            s2_data[:] = sorted(s2_data, key=lambda r: int(r.attrib.get("r", 0)))
+            files[sheet2_path] = serialize_xml_preserving_namespaces(s2_root, ns_map2)
+
+    # Escritura atómica con manejo explícito de bloqueo en Excel
+    atomic_write_zip(path, files)

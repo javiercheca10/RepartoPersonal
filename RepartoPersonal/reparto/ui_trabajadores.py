@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from reparto.datos import DEFAULT_POSITION_RULES, POSITIONS, POSITION_RULES
+from reparto.datos import DEFAULT_POSITION_RULES, POSITIONS, POSITION_RULES, sync_sequences_roster
 from reparto.gestion_trabajadores import (
     EditableWorker,
     load_editable_workers,
@@ -597,18 +597,30 @@ class PuestosDotacionesDialog(QDialog):
 class TrabajadoresTab(QWidget):
     """Pestaña integral de gestión de trabajadores con vista Maestro-Detalle."""
     data_saved = Signal()
+    dirty_changed = Signal(bool)
 
-    def __init__(self, pref_path: Path, parent=None):
+    def __init__(self, pref_path: Path, parent=None, seq_path: Path | None = None):
         super().__init__(parent)
         self.pref_path = Path(pref_path)
+        self.seq_path = Path(seq_path) if seq_path is not None else None
         self.workers: list[EditableWorker] = []
         self.positions: tuple[str, ...] = POSITIONS
         self.rules: dict[str, dict] = dict(POSITION_RULES)
         self.current_worker: EditableWorker | None = None
         self.chip_widgets: dict[str, PositionChipButton] = {}
+        self.is_dirty: bool = False
+        self._removed_worker_names: set[str] = set()
 
         self._setup_ui()
         self.load_data()
+
+    def _set_dirty(self, dirty: bool):
+        dirty = bool(dirty)
+        if self.is_dirty != dirty:
+            self.is_dirty = dirty
+            if hasattr(self, "save_btn"):
+                self.save_btn.setText("Guardar Cambios en Excel ●" if dirty else "Guardar Cambios en Excel")
+            self.dirty_changed.emit(dirty)
 
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -804,6 +816,17 @@ class TrabajadoresTab(QWidget):
         self._notification_timer.start(4000)
 
     def _on_reload_clicked(self):
+        if self.is_dirty:
+            reply = QMessageBox.question(
+                self,
+                "Cambios sin guardar",
+                "Hay modificaciones sin guardar en la pestaña Trabajadores.\n"
+                "¿Desea descartarlas y recargar desde el archivo Excel?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
         self.load_data()
         self._show_notification("✔ Datos sincronizados con el archivo Excel.")
 
@@ -814,6 +837,7 @@ class TrabajadoresTab(QWidget):
             if any(w.name.upper() == name for w in self.workers):
                 QMessageBox.warning(self, "Nombre duplicado", f"Ya existe un profesional con el nombre '{name}'.")
                 return
+            self._removed_worker_names.discard(name)
             new_worker = EditableWorker(
                 name=name,
                 row_index=len(self.workers) + 4,
@@ -830,6 +854,7 @@ class TrabajadoresTab(QWidget):
                     self.workers_list.setCurrentRow(r)
                     break
             self._update_summary()
+            self._set_dirty(True)
             self._show_notification(f"✔ Profesional '{name}' añadido. Asigne sus competencias y guarde.")
 
     def _on_delete_worker(self):
@@ -845,6 +870,7 @@ class TrabajadoresTab(QWidget):
         )
         if reply == QMessageBox.Yes:
             name = w.name
+            self._removed_worker_names.add(name)
             self.workers.remove(w)
             self.current_worker = None
             self._render_master_list()
@@ -857,6 +883,7 @@ class TrabajadoresTab(QWidget):
                     chip.set_state("")
                 self.pref_list.clear()
             self._update_summary()
+            self._set_dirty(True)
             self._show_notification(f"✔ Profesional '{name}' eliminado de la lista. Recuerde guardar en Excel.")
 
     def _open_positions_dialog(self):
@@ -880,6 +907,7 @@ class TrabajadoresTab(QWidget):
                     chip.set_state(self.current_worker.skills.get(pos, ""))
                 self.pref_list.set_preferences(self.current_worker.preference_order)
             self._render_master_list()
+            self._set_dirty(True)
             self._show_notification("✔ Puestos actualizados. Haga clic en 'Guardar Cambios en Excel' para persistir.")
 
     def _apply_styles(self):
@@ -1024,11 +1052,13 @@ class TrabajadoresTab(QWidget):
             self.workers = load_editable_workers(self.pref_path)
             self.positions = getattr(self.workers, "positions", POSITIONS)
             self.rules = getattr(self.workers, "rules", dict(POSITION_RULES))
+            self._removed_worker_names.clear()
             self.rebuild_position_chips(self.positions)
             self._render_master_list()
             if self.workers:
                 self.workers_list.setCurrentRow(0)
             self._update_summary()
+            self._set_dirty(False)
         except Exception as e:
             QMessageBox.warning(self, "Error al cargar plantilla", f"No se pudo leer la plantilla: {str(e)}")
 
@@ -1085,6 +1115,7 @@ class TrabajadoresTab(QWidget):
         self.current_worker.is_baja = is_baja
         self._refresh_current_list_item()
         self._update_summary()
+        self._set_dirty(True)
 
     def _on_chip_state_changed(self, pos: str, new_state: str):
         if not self.current_worker:
@@ -1093,11 +1124,13 @@ class TrabajadoresTab(QWidget):
         # Refrescar lista de preferencias con los puestos sabidos actuales
         self.pref_list.set_preferences(self.current_worker.preference_order)
         self._refresh_current_list_item()
+        self._set_dirty(True)
 
     def _on_preference_order_changed(self, new_order: list[str]):
         if not self.current_worker:
             return
         self.current_worker.preference_order = new_order
+        self._set_dirty(True)
 
     def _refresh_current_list_item(self):
         row = self.workers_list.currentRow()
@@ -1119,14 +1152,24 @@ class TrabajadoresTab(QWidget):
         bajas = sum(1 for w in self.workers if w.is_baja)
         self.summary_badge.setText(f"{total} profesionales  ·  {bajas} de baja")
 
-    def save_data(self):
-        """Guarda las modificaciones en Plantilla_Conocimientos_y_Preferencias.xlsx."""
+    def save_data(self) -> bool:
+        """Guarda las modificaciones en Plantilla_Conocimientos_y_Preferencias.xlsx y sincroniza secuencias."""
         if not self.pref_path.exists():
             QMessageBox.critical(self, "Error", f"No se encuentra la plantilla en {self.pref_path}")
-            return
+            return False
         try:
             save_editable_workers(self.pref_path, self.workers, positions=self.positions, rules=self.rules)
+            if self.seq_path is not None and self.seq_path.exists():
+                sync_sequences_roster(
+                    self.seq_path,
+                    [w.name for w in self.workers],
+                    removed_worker_names=self._removed_worker_names,
+                )
+            self._removed_worker_names.clear()
+            self._set_dirty(False)
             self._show_notification("✔ Cambios guardados correctamente en Plantilla_Conocimientos_y_Preferencias.xlsx")
             self.data_saved.emit()
+            return True
         except Exception as e:
             QMessageBox.critical(self, "Error al guardar", f"No se pudo guardar el archivo: {str(e)}")
+            return False

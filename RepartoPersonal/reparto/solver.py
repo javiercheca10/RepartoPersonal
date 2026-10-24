@@ -96,12 +96,14 @@ def solve_month(
             year=year,
             month=month,
             is_optimal=True,
+            status_name="Óptimo",
             vacancies_total=0,
             vacancies_dr=0,
             effort_spread=0.0,
             max_mean_effort=0.0,
             min_mean_effort=0.0,
             assignments=(),
+            vacancies=(),
             worker_efforts={},
             execution_time_seconds=0.0,
             issues=("Mes sin días laborables para reparto.",),
@@ -265,16 +267,20 @@ def solve_month(
         d_cnt = sum(1 for s in workdays if w.sequence[s.cycle_day - 1] in ("M", "T", "R"))
         worker_days_count[w.id] = d_cnt
 
-    k_positions = len(active_positions)
+    k_positions = max(1, len(active_positions))
     default_rank = max(1, k_positions // 2)
+    max_rank = max(
+        [k_positions, default_rank]
+        + [max(1, int(r)) for w in workers for r in w.ranking.values()]
+    )
 
     worker_pts = {}
     for w in workers:
         d_cnt = worker_days_count[w.id]
         if d_cnt > 0:
-            pts_var = model.new_int_var(0, k_positions * d_cnt, f"pts_{w.id}")
+            pts_var = model.new_int_var(0, max_rank * d_cnt, f"pts_{w.id}")
             terms = [
-                var * w.ranking.get(pos, default_rank)
+                var * max(1, int(w.ranking.get(pos, default_rank)))
                 for var, pos in worker_assigned_terms[w.id]
             ]
             model.add(pts_var == sum(terms))
@@ -284,9 +290,9 @@ def solve_month(
     # Para evaluar con precisión decimal usando enteros en CP-SAT, escalamos por 100:
     # 100 * pts_i <= M_max_scaled * d_cnt
     # 100 * pts_i >= M_min_scaled * d_cnt
-    m_max_scaled = model.new_int_var(0, k_positions * 100, "M_max_scaled")
-    m_min_scaled = model.new_int_var(0, k_positions * 100, "M_min_scaled")
-    spread_scaled = model.new_int_var(0, k_positions * 100, "spread_scaled")
+    m_max_scaled = model.new_int_var(0, max_rank * 100, "M_max_scaled")
+    m_min_scaled = model.new_int_var(0, max_rank * 100, "M_min_scaled")
+    spread_scaled = model.new_int_var(0, max_rank * 100, "spread_scaled")
     model.add(spread_scaled == m_max_scaled - m_min_scaled)
 
     for wid, pts_var in worker_pts.items():
@@ -337,6 +343,7 @@ def solve_month(
     if st1 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         opt_min_deficits = int(solver.value(total_min_deficits))
         opt_vacancies = int(solver.value(total_vacancies))
+        best_x = {k: int(solver.value(v)) for k, v in x.items()}
         if st1 != cp_model.OPTIMAL:
             is_optimal = False
         model.add(total_min_deficits == opt_min_deficits)
@@ -360,18 +367,24 @@ def solve_month(
         )
 
     # Fase 2: Vacantes de puesto reducible secundario (DR en radiología / prioridad 2)
+    model.clear_hints()
+    for k, val in best_x.items():
+        model.add_hint(x[k], val)
     model.minimize(total_prio2_vacancies)
     solver.parameters.max_time_in_seconds = max(1.0, time_limit_seconds * 0.25)
     st2 = solver.solve(model)
     if st2 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         opt_prio2_vacancies = int(solver.value(total_prio2_vacancies))
+        best_x = {k: int(solver.value(v)) for k, v in x.items()}
         if st2 != cp_model.OPTIMAL:
             is_optimal = False
         model.add(total_prio2_vacancies == opt_prio2_vacancies)
+    else:
+        is_optimal = False
 
     model.clear_hints()
-    for v in x.values():
-        model.add_hint(v, solver.value(v))
+    for k, val in best_x.items():
+        model.add_hint(x[k], val)
 
     # Fase 3: Equidad D016 (Minimizar dispersión de medias escaladas), no repetir >2 días y suma de puntos
     # spread_scaled * 10000 asegura prioridad sobre total_consec_penalty * 500 y total_points_sum
@@ -379,14 +392,18 @@ def solve_month(
     rem_time = max(1.0, time_limit_seconds - (perf_counter() - start_time))
     solver.parameters.max_time_in_seconds = rem_time
     st3 = solver.solve(model)
-    if st3 not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    if st3 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        best_x = {k: int(solver.value(v)) for k, v in x.items()}
+        if st3 != cp_model.OPTIMAL:
+            is_optimal = False
+    else:
         # Fallback de seguridad: si la fase 3 agota el tiempo sin solución factible,
-        # resolver con objetivo simple para recuperar la solución garantizada de Fase 2
+        # resolver con objetivo simple para recuperar o mejorar la solución garantizada de Fase 2
         model.minimize(total_points_sum)
         solver.parameters.max_time_in_seconds = 2.0
-        st3 = solver.solve(model)
-        is_optimal = False
-    elif st3 != cp_model.OPTIMAL:
+        st3_fb = solver.solve(model)
+        if st3_fb in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            best_x = {k: int(solver.value(v)) for k, v in x.items()}
         is_optimal = False
 
     status_name = "Óptimo" if is_optimal and st3 == cp_model.OPTIMAL else "Factible"
@@ -395,10 +412,10 @@ def solve_month(
     assignments_list = []
     w_assignments = defaultdict(list)
 
-    for (d, shift, wid, pos), var in x.items():
-        if solver.value(var) == 1:
+    for (d, shift, wid, pos), val in best_x.items():
+        if val == 1:
             w = workers_by_id[wid]
-            pts = 0 if pos == "." else w.ranking.get(pos, default_rank)
+            pts = 0 if pos == "." else max(1, int(w.ranking.get(pos, default_rank)))
             asg = Assignment(
                 day=d,
                 shift=shift,

@@ -22,6 +22,13 @@ import xml.etree.ElementTree as ET
 from xml.etree.ElementTree import fromstring
 from zipfile import ZipFile
 
+from reparto._xml_io import (
+    atomic_write_zip,
+    create_rotating_backup,
+    parse_xml_preserving_namespaces,
+    serialize_xml_preserving_namespaces,
+)
+
 # Catálogo oficial de puestos y dotaciones base en laborables (por defecto)
 DEFAULT_POSITIONS = (
     "EC", "MG", "PU", "DR", "UR", "A",
@@ -91,13 +98,26 @@ def parse_positions_from_header(xlsx_path: str | Path) -> tuple[str, ...]:
     return DEFAULT_POSITIONS
 
 
+def _to_int_or_none(val: object) -> int | None:
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        return int(val)
+    s = str(val).strip()
+    if s and (s.isdigit() or (s.startswith("-") and s[1:].isdigit())):
+        return int(s)
+    return None
+
+
 def parse_position_rules(
     xlsx_path: str | Path,
     positions: tuple[str, ...] | None = None
 ) -> dict[str, dict]:
     """Lee las dotaciones objetivo, mínimos y criterios de reducción desde la Hoja 2.
 
-    Si no existe la Hoja 2 o faltan puestos, aplica valores por defecto inteligentes.
+    Si la Hoja 2 incluye columnas numéricas estructuradas (E..I: Obj. M, Obj. T, Mín. M,
+    Mín. T, Prioridad), las lee de forma exacta sin pérdida. Si es una plantilla antigua
+    de solo 4 columnas (A..D), interpreta el texto de las columnas C y D.
     """
     path = Path(xlsx_path)
     if positions is None:
@@ -117,42 +137,59 @@ def parse_position_rules(
                 if not code_raw:
                     continue
                 code = str(code_raw).strip().upper()
+                if "CONCEPTOS CLAVE" in code:
+                    break
                 if not code or code in ("CÓDIGO", "CODIGO", "PUESTO", "TOTAL"):
                     continue
 
                 name = str(cells.get((r, 1)) or code).strip()
-                target_str = str(cells.get((r, 2)) or "").strip()
-                crit_str = str(cells.get((r, 3)) or "").strip()
 
-                # Extraer objetivos
-                tm, tt = 1, 1
-                m_tgt = re.search(r"(\d+)\s*M", target_str, re.IGNORECASE)
-                t_tgt = re.search(r"(\d+)\s*T", target_str, re.IGNORECASE)
-                if m_tgt:
-                    tm = int(m_tgt.group(1))
-                if t_tgt:
-                    tt = int(t_tgt.group(1))
+                # 1. Intentar lectura exacta desde columnas numéricas estructuradas (E..I -> col 4..8)
+                col_tm = _to_int_or_none(cells.get((r, 4)))
+                col_tt = _to_int_or_none(cells.get((r, 5)))
+                if col_tm is not None and col_tt is not None:
+                    tm = max(0, col_tm)
+                    tt = max(0, col_tt)
+                    col_mm = _to_int_or_none(cells.get((r, 6)))
+                    col_mt = _to_int_or_none(cells.get((r, 7)))
+                    col_pr = _to_int_or_none(cells.get((r, 8)))
+                    mm = min(tm, max(0, col_mm)) if col_mm is not None else tm
+                    mt = min(tt, max(0, col_mt)) if col_mt is not None else tt
+                    prio = col_pr if col_pr in (0, 1, 2) else 0
+                else:
+                    # 2. Fallback para plantillas heredadas de 4 columnas (texto en C y D)
+                    target_str = str(cells.get((r, 2)) or "").strip()
+                    crit_str = str(cells.get((r, 3)) or "").strip()
 
-                # Extraer mínimos
-                mm, mt = tm, tt
-                if "hasta" in crit_str.lower():
-                    m_min = re.search(r"hasta\s*(\d+)\s*M", crit_str, re.IGNORECASE)
-                    t_min = re.search(r"(\d+)\s*T", crit_str, re.IGNORECASE)
-                    if m_min:
-                        mm = int(m_min.group(1))
-                    if t_min:
-                        mt = int(t_min.group(1))
-                elif "tarde reducible" in crit_str.lower():
-                    t_red = re.search(r"a\s*(\d+)\s*T", crit_str, re.IGNORECASE)
-                    if t_red:
-                        mt = int(t_red.group(1))
+                    tm, tt = 1, 1
+                    m_tgt = re.search(r"(\d+)\s*M", target_str, re.IGNORECASE)
+                    t_tgt = re.search(r"(\d+)\s*T", target_str, re.IGNORECASE)
+                    if m_tgt:
+                        tm = int(m_tgt.group(1))
+                    if t_tgt:
+                        tt = int(t_tgt.group(1))
 
-                # Extraer prioridad de reducción
-                prio = 0
-                if "después de" in crit_str.lower() or "despues de" in crit_str.lower():
-                    prio = 2
-                elif "reducible" in crit_str.lower():
-                    prio = 1
+                    mm, mt = tm, tt
+                    if "hasta" in crit_str.lower():
+                        m_min = re.search(r"hasta\s*(\d+)\s*M", crit_str, re.IGNORECASE)
+                        t_min = re.search(r"(\d+)\s*T", crit_str, re.IGNORECASE)
+                        if m_min:
+                            mm = int(m_min.group(1))
+                        if t_min:
+                            mt = int(t_min.group(1))
+                    elif "tarde reducible" in crit_str.lower():
+                        t_red = re.search(r"a\s*(\d+)\s*T", crit_str, re.IGNORECASE)
+                        if t_red:
+                            mt = int(t_red.group(1))
+
+                    prio = 0
+                    crit_lower = crit_str.lower()
+                    if "sin prioridad" in crit_lower or "no reducible" in crit_lower:
+                        prio = 0
+                    elif "después de" in crit_lower or "despues de" in crit_lower:
+                        prio = 2
+                    elif "reducible" in crit_lower:
+                        prio = 1
 
                 rules[code] = {
                     "name": name,
@@ -386,9 +423,10 @@ def _parse_xlsx_cells(data: bytes, sheet_name_contains: str | None = None) -> tu
 class LoadReport:
     """Avisos de la carga de configuración. No bloquean el cálculo: se muestran para revisar."""
     warnings: tuple[str, ...] = ()
-    bajas: tuple[str, ...] = ()           # Trabajadores de baja descartados
-    sin_ficha: tuple[str, ...] = ()       # En secuencias pero sin ficha de conocimientos
-    sin_conocimientos: tuple[str, ...] = ()  # Con ficha pero ningún conocimiento marcado
+    bajas: tuple[str, ...] = ()             # Trabajadores de baja descartados
+    sin_ficha: tuple[str, ...] = ()         # En secuencias pero sin ficha de conocimientos
+    sin_conocimientos: tuple[str, ...] = () # Con ficha pero ningún conocimiento marcado
+    sin_secuencia: tuple[str, ...] = ()     # En plantilla de conocimientos pero sin secuencia de turnos
 
 
 def _col_letter(c_idx: int) -> str:
@@ -594,20 +632,26 @@ def load_skills_and_preferences(
                 vetoes.add(pos)
 
         # Columnas de Preferencias
+        raw_ranking = {}
         for pos, c_idx in prefs_cols.items():
-            val = cells.get((r, c_idx))
-            if isinstance(val, (int, float)) and not isinstance(val, bool):
-                ranking[pos] = int(val)
+            val = _to_int_or_none(cells.get((r, c_idx)))
+            if val is not None and val > 0:
+                raw_ranking[pos] = val
 
-        # Puestos sabidos sin número de preferencia: a continuación del último ranking
-        next_rank = max(ranking.values(), default=0)
-        for pos in positions:
-            if pos in skills and pos not in ranking:
-                next_rank += 1
-                ranking[pos] = next_rank
+        # Compactar y numerar puestos activos (sabidos y no vetados) en 1..N
+        # respetando el orden de preferencia declarado y, a continuación, el orden del catálogo.
+        active_skills = skills - vetoes
+        pos_order = {pos: idx for idx, pos in enumerate(positions)}
+        ranked_active = sorted(
+            (pos for pos in active_skills if pos in raw_ranking),
+            key=lambda p: (raw_ranking[p], pos_order.get(p, 999)),
+        )
+        unranked_active = [pos for pos in positions if pos in active_skills and pos not in raw_ranking]
+        ordered_active = ranked_active + unranked_active
+        ranking = {pos: idx + 1 for idx, pos in enumerate(ordered_active)}
 
         profiles[name_clean] = {
-            "skills": frozenset(skills - vetoes),
+            "skills": frozenset(active_skills),
             "vetoes": frozenset(vetoes),
             "ranking": ranking,
             "baja": is_baja,
@@ -634,14 +678,18 @@ def load_all_workers_with_report(
     bajas = []
     sin_ficha = []
     sin_conocimientos = []
+    matched_pref_names = set()
 
     for name, seq in seqs.items():
         p_data = prefs.get(name)
-        if not p_data:
+        if p_data is not None:
+            matched_pref_names.add(name)
+        else:
             # Coincidencia flexible solo por reordenación de palabras del nombre
             for p_name, data in prefs.items():
                 if set(name.split()) == set(p_name.split()):
                     p_data = data
+                    matched_pref_names.add(p_name)
                     break
 
         if p_data is None:
@@ -666,6 +714,11 @@ def load_all_workers_with_report(
             sequence=seq,
         ))
 
+    sin_secuencia = [
+        p_name for p_name, p_data in prefs.items()
+        if p_name not in matched_pref_names and not p_data.get("baja", False)
+    ]
+
     if sin_ficha:
         warnings.append(
             f"{len(sin_ficha)} trabajador(es) sin ficha de conocimientos (no cubrirán ningún puesto): "
@@ -676,6 +729,11 @@ def load_all_workers_with_report(
             f"{len(sin_conocimientos)} trabajador(es) sin ningún conocimiento marcado: "
             + ", ".join(sin_conocimientos)
         )
+    if sin_secuencia:
+        warnings.append(
+            f"{len(sin_secuencia)} trabajador(es) en la plantilla no tienen fila en Secuencias de Turnos: "
+            + ", ".join(sin_secuencia)
+        )
     ids = [w.id for w in workers]
     if len(set(ids)) != len(ids):
         warnings.append("Colisión de identificadores de trabajador: revise nombres duplicados.")
@@ -685,6 +743,7 @@ def load_all_workers_with_report(
         bajas=tuple(bajas),
         sin_ficha=tuple(sin_ficha),
         sin_conocimientos=tuple(sin_conocimientos),
+        sin_secuencia=tuple(sin_secuencia),
     )
     return tuple(workers), report
 
@@ -882,36 +941,67 @@ def load_sequence_records(xlsx_path: str | Path, cycle_weeks: int | None = None)
     return records, cycle_weeks
 
 
-def save_sequence_records(xlsx_path: str | Path, records: list[dict], cycle_weeks: int | None = None) -> None:
-    """Guarda modificaciones de marcas de turnos en el archivo Excel de secuencias."""
+def save_sequence_records(
+    xlsx_path: str | Path,
+    records: list[dict],
+    cycle_weeks: int | None = None,
+    sync_roster: bool = False,
+) -> None:
+    """Guarda modificaciones de marcas de turnos en el archivo Excel de secuencias.
+
+    Si ``sync_roster=True`` o si hay registros en ``records`` que aún no existen como fila
+    en el archivo Excel, inserta las filas nuevas y elimina las bajas definitivas manteniendo
+    intactas las filas de cabecera y estilos de celda.
+    """
     p = Path(xlsx_path)
     if not p.exists():
         raise FileNotFoundError(f"No se encuentra el archivo de secuencias: {xlsx_path}")
 
-    # Backup de seguridad antes de escribir
-    bak = p.with_suffix(p.suffix + ".bak")
-    shutil.copy2(p, bak)
+    # Backup de seguridad rotativo antes de escribir
+    create_rotating_backup(p)
 
     if cycle_weeks is None:
         cycle_weeks = detect_cycle_weeks(p)
     cycle_days = cycle_weeks * 7
 
     data = p.read_bytes()
+    _, parsed_cells = _parse_xlsx_cells(data, sheet_name_contains="secuencia")
     with zipfile.ZipFile(io.BytesIO(data), "r") as zin:
         manifest = {item.filename: zin.read(item.filename) for item in zin.infolist()}
 
     MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-    ET.register_namespace("", MAIN)
-    tree = ET.fromstring(manifest["xl/worksheets/sheet1.xml"])
+    sheet_bytes = manifest["xl/worksheets/sheet1.xml"]
+    tree, ns_map = parse_xml_preserving_namespaces(sheet_bytes)
+    sheet_data = tree.find(f"{{{MAIN}}}sheetData")
 
-    # Mapa de records por número de fila XML (1-indexed)
-    rec_by_row = {r["row"] + 1: r for r in records if "row" in r}
+    # Mapa de records por nombre normalizado y fallback por número de fila XML (1-indexed)
+    rec_by_name = {
+        _normalize_name(r["name"]): r
+        for r in records
+        if isinstance(r.get("name"), str) and r["name"].strip()
+    }
+    rec_by_row = {r["row"] + 1: r for r in records if "row" in r and r.get("row", -1) >= 0}
 
-    for row_el in tree.findall(f".//{{{MAIN}}}row"):
+    matched_names = set()
+    rows_to_remove = []
+    last_worker_r_num = 3
+
+    for row_el in list(tree.findall(f".//{{{MAIN}}}row")):
         r_num = int(row_el.attrib.get("r", 0))
-        if r_num not in rec_by_row:
+        row_name_raw = parsed_cells.get((r_num - 1, 1))
+        row_name = _normalize_name(str(row_name_raw)) if isinstance(row_name_raw, str) else ""
+        is_header = any(
+            term in row_name for term in ("APELLIDOS", "NOMBRE", "SERVICIO", "TOTAL", "PUESTOS", "SEMANA")
+        ) or r_num <= 3
+
+        rec = rec_by_name.get(row_name) or (None if sync_roster else rec_by_row.get(r_num))
+        if rec is None:
+            if sync_roster and not is_header and row_name:
+                rows_to_remove.append(row_el)
             continue
-        rec = rec_by_row[r_num]
+
+        matched_names.add(_normalize_name(rec.get("name", row_name)))
+        last_worker_r_num = max(last_worker_r_num, r_num)
         seq = rec.get("sequence", [])
 
         # Existentes celdas en la fila indexadas por columna (0-indexed)
@@ -977,11 +1067,117 @@ def save_sequence_records(xlsx_path: str | Path, records: list[dict], cycle_week
         for c in sorted_cells:
             row_el.append(c)
 
-    manifest["xl/worksheets/sheet1.xml"] = ET.tostring(tree, encoding="utf-8", xml_declaration=True)
+    if sheet_data is not None:
+        for r_el in rows_to_remove:
+            sheet_data.remove(r_el)
 
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
-        for fname, fcontent in manifest.items():
-            zout.writestr(fname, fcontent)
+        # Añadir filas para nuevos profesionales que no existían en el Excel de secuencias
+        new_records = [
+            r for r in records
+            if isinstance(r.get("name"), str)
+            and r["name"].strip()
+            and _normalize_name(r["name"]) not in matched_names
+        ]
+        if new_records:
+            # Eliminar filas vacías situadas por debajo del último trabajador para evitar colisión de 'r'
+            for r_el in list(sheet_data.findall(f"{{{MAIN}}}row")):
+                if int(r_el.attrib.get("r", 0)) > last_worker_r_num:
+                    sheet_data.remove(r_el)
 
-    p.write_bytes(buf.getvalue())
+            for idx_new, rec in enumerate(new_records, 1):
+                r_num = last_worker_r_num + idx_new
+                rec["row"] = r_num - 1
+                row_el = ET.SubElement(
+                    sheet_data,
+                    f"{{{MAIN}}}row",
+                    {"r": str(r_num), "ht": "21", "customHeight": "1", "s": "19"},
+                )
+                # Col A: Número
+                c_a = ET.SubElement(row_el, f"{{{MAIN}}}c", {"r": f"A{r_num}", "s": "28", "t": "n"})
+                v_a = ET.SubElement(c_a, f"{{{MAIN}}}v")
+                v_a.text = str(rec.get("num") or (r_num - 3))
+                # Col B: Nombre
+                c_b = ET.SubElement(row_el, f"{{{MAIN}}}c", {"r": f"B{r_num}", "s": "29", "t": "inlineStr"})
+                is_b = ET.SubElement(c_b, f"{{{MAIN}}}is")
+                t_b = ET.SubElement(is_b, f"{{{MAIN}}}t")
+                t_b.text = rec["name"].strip()
+
+                seq = list(rec.get("sequence", []))
+                if len(seq) < cycle_days:
+                    seq.extend(["M" if (i % 7) < 5 else "D" for i in range(len(seq), cycle_days)])
+                for i in range(cycle_days):
+                    c_idx = 2 + i
+                    col_let = _col_letter(c_idx)
+                    c_m = ET.SubElement(row_el, f"{{{MAIN}}}c", {"r": f"{col_let}{r_num}", "s": "30", "t": "inlineStr"})
+                    is_m = ET.SubElement(c_m, f"{{{MAIN}}}is")
+                    t_m = ET.SubElement(is_m, f"{{{MAIN}}}t")
+                    t_m.text = seq[i]
+
+                m_cnt = seq[:cycle_days].count("M")
+                t_cnt = seq[:cycle_days].count("T")
+                d_cnt = seq[:cycle_days].count("D")
+                r_cnt = seq[:cycle_days].count("R")
+                for s_idx, val in enumerate((m_cnt, t_cnt, d_cnt, r_cnt, cycle_days)):
+                    c_idx = 2 + cycle_days + s_idx
+                    col_let = _col_letter(c_idx)
+                    c_s = ET.SubElement(row_el, f"{{{MAIN}}}c", {"r": f"{col_let}{r_num}", "s": "33", "t": "n"})
+                    v_s = ET.SubElement(c_s, f"{{{MAIN}}}v")
+                    v_s.text = str(val)
+
+        sheet_data[:] = sorted(sheet_data, key=lambda r: int(r.attrib.get("r", 0)))
+
+    manifest["xl/worksheets/sheet1.xml"] = serialize_xml_preserving_namespaces(tree, ns_map)
+    atomic_write_zip(p, manifest)
+
+
+def sync_sequences_roster(
+    seq_path: str | Path,
+    active_worker_names: list[str] | tuple[str, ...],
+    removed_worker_names: set[str] | list[str] | None = None,
+) -> bool:
+    """Sincroniza las altas y eliminaciones de profesionales con el archivo de secuencias (C5).
+
+    - Elimina del archivo de secuencias a los profesionales en ``removed_worker_names``.
+    - Añade al archivo de secuencias a los profesionales en ``active_worker_names`` que aún no tengan fila,
+      con una secuencia base inicial (M de lunes a viernes, D en sábado y domingo) para que el usuario
+      pueda ajustarla en la pestaña 'Secuencias de Turnos'.
+    Devuelve True si realizó algún cambio en el archivo de secuencias.
+    """
+    p = Path(seq_path)
+    if not p.exists():
+        return False
+
+    records, cycle_weeks = load_sequence_records(p)
+    cycle_days = cycle_weeks * 7
+    removed_norm = {_normalize_name(n) for n in (removed_worker_names or ()) if n}
+
+    changed = False
+    if removed_norm:
+        filtered = [r for r in records if _normalize_name(r.get("name", "")) not in removed_norm]
+        if len(filtered) != len(records):
+            records = filtered
+            changed = True
+
+    existing_norm = {_normalize_name(r.get("name", "")) for r in records}
+    for name in active_worker_names:
+        norm = _normalize_name(name)
+        if not norm or norm in existing_norm:
+            continue
+        default_seq = ["M" if (d % 7) < 5 else "D" for d in range(cycle_days)]
+        records.append({
+            "row": -1,
+            "num": str(len(records) + 1),
+            "name": norm,
+            "sequence": default_seq,
+            "m": default_seq.count("M"),
+            "t": 0,
+            "d": default_seq.count("D"),
+            "r": 0,
+            "total": cycle_days,
+        })
+        existing_norm.add(norm)
+        changed = True
+
+    if changed:
+        save_sequence_records(p, records, cycle_weeks=cycle_weeks, sync_roster=True)
+    return changed
