@@ -430,8 +430,23 @@ class SecuenciasWidget(QWidget):
         if 2 <= col < 2 + self.cycle_days:
             d_idx = col - 2
             raw = item.text().strip().upper()
-            if raw not in ("M", "T", "D", "R"):
+            prev = (
+                self.records[row]["sequence"][d_idx]
+                if 0 <= row < len(self.records) and d_idx < len(self.records[row]["sequence"])
+                else "D"
+            )
+            if raw == "":
                 raw = "D"
+            elif raw not in ("M", "T", "D", "R"):
+                self.table.blockSignals(True)
+                item.setText(prev)
+                self._style_cell_item(item, prev, d_idx)
+                self.table.blockSignals(False)
+                self._show_notification(
+                    f"Marca '{raw}' no válida: use M (Mañana), T (Tarde), D (Descanso) o R (Refuerzo).",
+                    is_error=True,
+                )
+                return
 
             self.table.blockSignals(True)
             item.setText(raw)
@@ -441,7 +456,6 @@ class SecuenciasWidget(QWidget):
             if 0 <= row < len(self.records):
                 seq = self.records[row]["sequence"]
                 if d_idx < len(seq):
-                    prev = seq[d_idx]
                     seq[d_idx] = raw
                     if prev != raw:
                         self._set_dirty(True)

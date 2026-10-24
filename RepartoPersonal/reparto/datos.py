@@ -77,11 +77,15 @@ def parse_positions_from_header(xlsx_path: str | Path) -> tuple[str, ...]:
         header_row = 2  # Fila 3 en Excel (0-indexed 2)
         max_col = max((c for r, c in cells if r == header_row), default=0)
 
-        # Localizar columna BAJA o empezar tras columna B (índice 1)
-        baja_col = next((c for c in range(max_col + 1) if "BAJA" in str(cells.get((header_row, c)) or "").upper()), 2)
+        # Localizar columna BAJA si existe; si no, empezar tras columna B (índice 2)
+        baja_col = next(
+            (c for c in range(max_col + 1) if "BAJA" in str(cells.get((header_row, c)) or "").upper()),
+            None,
+        )
+        start_col = (baja_col + 1) if baja_col is not None else 2
 
         positions: list[str] = []
-        for c in range(baja_col + 1, max_col + 1):
+        for c in range(start_col, max_col + 1):
             val = str(cells.get((header_row, c)) or "").strip()
             if not val:
                 continue
@@ -228,7 +232,8 @@ def get_position_targets(
 ) -> tuple[int, int, int, int]:
     """Devuelve (target_m, target_t, min_m, min_t) para un puesto y día de semana (0=Lunes..4=Viernes)."""
     rules = position_rules if position_rules is not None else POSITION_RULES
-    if pos == "O" and rules.get("O", {}).get("target_m", 0) == 0:
+    r_o = rules.get("O", {})
+    if pos == "O" and r_o.get("target_m", 0) == 0 and r_o.get("target_t", 0) == 0:
         # O abre Martes(1) y Jueves(3) por la mañana; Viernes(4) por la tarde
         m = 1 if weekday in (1, 3) else 0
         t = 1 if weekday == 4 else 0
@@ -548,10 +553,12 @@ def load_sequences(
         # Extraer las marcas del ciclo (Col C en adelante)
         marks = []
         unknown = set()
+        has_valid_mark = False
         for c in range(2, 2 + cycle_days):
             raw = str(cells.get((r, c)) or "").strip().upper()
             if raw in ("M", "T", "D", "R"):
                 marks.append(raw)
+                has_valid_mark = True
             else:
                 if raw:
                     unknown.add(raw)
@@ -561,7 +568,7 @@ def load_sequences(
                 f"Secuencia de {name_clean}: marcas desconocidas {sorted(unknown)} tratadas como descanso."
             )
 
-        if any(m in ("M", "T") for m in marks):
+        if has_valid_mark or any(m in ("M", "T", "R") for m in marks):
             if name_clean in sequences and warnings is not None:
                 warnings.append(f"Nombre duplicado en secuencias: {name_clean} (se usa la última fila).")
             sequences[name_clean] = tuple(marks)

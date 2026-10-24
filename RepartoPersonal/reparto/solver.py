@@ -209,6 +209,7 @@ def solve_month(
     # 4. Restricciones de Cobertura y Dotaciones por Puesto
     coverage_counts = {}
     vacancy_vars = []
+    prio0_vacancy_vars = []
     prio2_vacancy_vars = []
     min_deficit_vars = []
 
@@ -236,35 +237,28 @@ def solve_month(
                     model.add(def_min >= mn - actual_count)
                     min_deficit_vars.append(def_min)
 
-                prio = active_rules.get(pos, {}).get("priority", 0) if active_rules else (2 if pos == "DR" else (1 if pos == "EC" else 0))
+                prio = (
+                    active_rules.get(pos, {}).get("priority", 0)
+                    if active_rules
+                    else (2 if pos == "DR" else (1 if pos == "EC" else 0))
+                )
                 if prio == 2 or (not active_rules and pos == "DR"):
                     prio2_vacancy_vars.append(vac)
-
-                # Regla de reducción ordenada para cualquier puesto con prioridad 2:
-                # solo se reduce si los puestos con prioridad 1 ya están en su mínimo o menor
-                if prio == 2 or (not active_rules and pos == "DR" and shift == "T"):
-                    if active_rules:
-                        prio1_positions = [p for p in targets.keys() if active_rules.get(p, {}).get("priority", 0) == 1]
-                    else:
-                        prio1_positions = ["EC"] if (pos == "DR" and shift == "T" and "EC" in targets) else []
-
-                    for p1 in prio1_positions:
-                        if (d, shift, p1) in coverage_counts:
-                            p1_cnt = coverage_counts[d, shift, p1]
-                            p1_min = targets[p1][1]
-                            reduced_p2 = model.new_bool_var(f"red_{pos}_{d}_{shift}_{p1}")
-                            model.add(actual_count < tgt).only_enforce_if(reduced_p2)
-                            model.add(actual_count == tgt).only_enforce_if(reduced_p2.negated())
-                            model.add(p1_cnt <= p1_min).only_enforce_if(reduced_p2)
+                elif prio == 0:
+                    prio0_vacancy_vars.append(vac)
 
     total_min_deficits = sum(min_deficit_vars) if min_deficit_vars else 0
     total_vacancies = sum(vacancy_vars) if vacancy_vars else 0
+    total_prio0_vacancies = sum(prio0_vacancy_vars) if prio0_vacancy_vars else 0
     total_prio2_vacancies = sum(prio2_vacancy_vars) if prio2_vacancy_vars else 0
 
     # 5. Cálculo de Esfuerzo Individual y Equidad
     worker_days_count = {}
     for w in workers:
-        d_cnt = sum(1 for s in workdays if w.sequence[s.cycle_day - 1] in ("M", "T", "R"))
+        d_cnt = sum(
+            1 for s in workdays
+            if (w.sequence[(s.cycle_day - 1) % len(w.sequence)] if w.sequence else "D") in ("M", "T", "R")
+        )
         worker_days_count[w.id] = d_cnt
 
     k_positions = max(1, len(active_positions))
@@ -366,18 +360,21 @@ def solve_month(
             issues=("Tiempo agotado sin encontrar solución factible.",),
         )
 
-    # Fase 2: Vacantes de puesto reducible secundario (DR en radiología / prioridad 2)
+    # Fase 2: Jerarquía de reducción ordenada (prioridad 1 se reduce primero, luego prioridad 2, y por último estrictos)
     model.clear_hints()
     for k, val in best_x.items():
         model.add_hint(x[k], val)
-    model.minimize(total_prio2_vacancies)
+    phase2_objective = total_prio0_vacancies * 100 + total_prio2_vacancies
+    model.minimize(phase2_objective)
     solver.parameters.max_time_in_seconds = max(1.0, time_limit_seconds * 0.25)
     st2 = solver.solve(model)
     if st2 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        opt_prio0_vacancies = int(solver.value(total_prio0_vacancies))
         opt_prio2_vacancies = int(solver.value(total_prio2_vacancies))
         best_x = {k: int(solver.value(v)) for k, v in x.items()}
         if st2 != cp_model.OPTIMAL:
             is_optimal = False
+        model.add(total_prio0_vacancies == opt_prio0_vacancies)
         model.add(total_prio2_vacancies == opt_prio2_vacancies)
     else:
         is_optimal = False

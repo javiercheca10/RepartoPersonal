@@ -81,7 +81,7 @@ def audit_assignments(
             issues.append(f"AUDITORÍA: {w.name} asignado en día no laborable {a.day}")
         per_worker_day[(a.worker_id, a.day)] += 1
 
-        mark = w.sequence[s.cycle_day - 1]
+        mark = w.sequence[(s.cycle_day - 1) % len(w.sequence)] if w.sequence else "D"
         if mark == "M" and a.shift != "M" or mark == "T" and a.shift != "T" or mark not in ("M", "T", "R"):
             issues.append(f"AUDITORÍA: {w.name} asignado el {a.day} en turno {a.shift} pero su marca es {mark}")
 

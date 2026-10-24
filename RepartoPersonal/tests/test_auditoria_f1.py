@@ -248,6 +248,105 @@ class TestAuditoriaFase1(unittest.TestCase):
         self.assertEqual(_format_shift_mark("TRIAJE", "T"), "TRIAJE(T)")
         self.assertEqual(_format_shift_mark(".", "T"), ".t")
 
+    def test_n1_solver_does_not_force_artificial_vacancy_in_prio1_when_prio2_lacks_skills(self):
+        """N1: Si DR (prio 2) no tiene suficientes trabajadores con ese conocimiento, EC (prio 1) no se recorta artificialmente."""
+        workers = (
+            WorkerProfile("w1", "W1", frozenset({"EC"}), frozenset(), {"EC": 1}, ("M",) * 168),
+            WorkerProfile("w2", "W2", frozenset({"EC"}), frozenset(), {"EC": 1}, ("M",) * 168),
+            WorkerProfile("w3", "W3", frozenset({"EC"}), frozenset(), {"EC": 1}, ("M",) * 168),
+            WorkerProfile("w4", "W4", frozenset({"EC"}), frozenset(), {"EC": 1}, ("M",) * 168),
+            WorkerProfile("w5", "W5", frozenset({"DR"}), frozenset(), {"DR": 1}, ("M",) * 168),
+            WorkerProfile("w6", "W6", frozenset({"DR"}), frozenset(), {"DR": 1}, ("M",) * 168),
+        )
+        sched = (
+            DaySchedule(
+                day=date(2026, 11, 3), cycle_day=1, weekday=1, is_workday=True,
+                workers_m=("w1", "w2", "w3", "w4", "w5", "w6"), workers_t=(), workers_r=(),
+                targets_m={"DR": (3, 2), "EC": (4, 3)},
+                targets_t={"DR": (0, 0), "EC": (0, 0)},
+            ),
+        )
+        rules = {
+            "DR": {"target_m": 3, "target_t": 0, "min_m": 2, "min_t": 0, "priority": 2},
+            "EC": {"target_m": 4, "target_t": 0, "min_m": 3, "min_t": 0, "priority": 1},
+        }
+        res = solve_month(2026, 11, sched, workers, positions=("DR", "EC"), position_rules=rules)
+        self.assertEqual(res.vacancies_total, 1)
+        self.assertEqual(res.vacancies[0].position, "DR")
+        self.assertEqual(sum(1 for a in res.assignments if a.position == "EC"), 4)
+        self.assertEqual(sum(1 for a in res.assignments if a.position == "."), 0)
+
+    def test_n1_solver_reduces_prio1_before_prio2_regardless_of_catalog_order(self):
+        """N1: Cuando comparten personal polivalente, prio 1 (EC) se reduce antes que prio 2 (DR) aunque DR vaya antes en el catálogo."""
+        workers = tuple(
+            WorkerProfile(f"w{i}", f"W{i}", frozenset({"DR", "EC"}), frozenset(), {"DR": 1, "EC": 1}, ("M",) * 168)
+            for i in range(1, 7)
+        )
+        sched = (
+            DaySchedule(
+                day=date(2026, 11, 3), cycle_day=1, weekday=1, is_workday=True,
+                workers_m=tuple(w.id for w in workers), workers_t=(), workers_r=(),
+                targets_m={"DR": (3, 2), "EC": (4, 3)},
+                targets_t={"DR": (0, 0), "EC": (0, 0)},
+            ),
+        )
+        rules = {
+            "DR": {"target_m": 3, "target_t": 0, "min_m": 2, "min_t": 0, "priority": 2},
+            "EC": {"target_m": 4, "target_t": 0, "min_m": 3, "min_t": 0, "priority": 1},
+        }
+        res = solve_month(2026, 11, sched, workers, positions=("DR", "EC"), position_rules=rules)
+        self.assertEqual(res.vacancies_total, 1)
+        self.assertEqual(res.vacancies[0].position, "EC")
+        self.assertEqual(res.vacancies_dr, 0)
+
+    def test_n3_renaming_position_in_dialog_migrates_worker_skills_and_preferences(self):
+        """N3: Renombrar el código de un puesto en PuestosDotacionesDialog migra competencias y preferencias."""
+        from PySide6.QtWidgets import QApplication
+        from reparto.ui_trabajadores import PuestosDotacionesDialog
+
+        _app = QApplication.instance() or QApplication([])
+        dlg = PuestosDotacionesDialog(
+            positions=("EC", "MG"),
+            rules={
+                "EC": {"name": "Ecografía", "target_m": 2, "target_t": 1, "min_m": 2, "min_t": 1, "priority": 1},
+                "MG": {"name": "Mamografía", "target_m": 1, "target_t": 1, "min_m": 1, "min_t": 1, "priority": 0},
+            },
+        )
+        # Renombrar fila 0 de EC a ECO
+        dlg.table.cellWidget(0, 0).setText("ECO")
+        dlg._on_save()
+        new_pos, new_rules = dlg.get_data()
+        renamed = dlg.get_renamed_map()
+        self.assertEqual(new_pos, ("ECO", "MG"))
+        self.assertEqual(renamed, {"EC": "ECO"})
+        self.assertEqual(new_rules["ECO"]["name"], "Ecografía")
+
+    def test_n4_stale_calc_chain_removed_on_save(self):
+        """N4: Si un archivo Excel contiene xl/calcChain.xml, atomic_write_zip lo limpia para evitar avisos de Excel."""
+        with zipfile.ZipFile(self.pref_path, "r") as zin:
+            manifest = {item.filename: zin.read(item.filename) for item in zin.infolist()}
+        manifest["xl/calcChain.xml"] = b'<?xml version="1.0" encoding="UTF-8"?><calcChain/>'
+        with zipfile.ZipFile(self.pref_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for k, v in manifest.items():
+                zout.writestr(k, v)
+
+        workers = load_editable_workers(self.pref_path)
+        save_editable_workers(self.pref_path, workers)
+
+        with zipfile.ZipFile(self.pref_path, "r") as zin:
+            self.assertNotIn("xl/calcChain.xml", zin.namelist())
+
+    def test_n6_pure_reinforcement_worker_loaded_in_sequences(self):
+        """N6: Un profesional con solo marcas 'R' y 'D' se carga en load_sequences y no se descarta."""
+        seq_r = ["R" if (d % 7) < 5 else "D" for d in range(168)]
+        seq_p, pref_p = write_config(self.dir / "refuerzo", [
+            {"name": "CORRETURNOS PURO", "seq": seq_r, "skills": {"EC"}, "ranking": {"EC": 1}},
+        ])
+        workers, report = load_all_workers_with_report(seq_p, pref_p)
+        self.assertEqual(len(workers), 1)
+        self.assertEqual(workers[0].name, "CORRETURNOS PURO")
+        self.assertEqual(report.sin_secuencia, ())
+
 
 if __name__ == "__main__":
     unittest.main()

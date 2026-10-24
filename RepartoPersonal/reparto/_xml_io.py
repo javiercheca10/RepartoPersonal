@@ -115,13 +115,46 @@ def create_rotating_backup(path: Path, max_backups: int = 10) -> Path:
     return bak_path
 
 
+def _strip_stale_calc_chain(files: dict[str, bytes]) -> dict[str, bytes]:
+    """Elimina xl/calcChain.xml y sus referencias para evitar avisos de fórmulas huérfanas en Excel (N4)."""
+    if "xl/calcChain.xml" not in files:
+        return files
+    cleaned = dict(files)
+    cleaned.pop("xl/calcChain.xml", None)
+
+    rels_key = "xl/_rels/workbook.xml.rels"
+    if rels_key in cleaned:
+        try:
+            r_root, r_ns = parse_xml_preserving_namespaces(cleaned[rels_key])
+            for rel in list(r_root):
+                if "calcChain" in rel.attrib.get("Target", "") or "calcChain" in rel.attrib.get("Type", ""):
+                    r_root.remove(rel)
+            cleaned[rels_key] = serialize_xml_preserving_namespaces(r_root, r_ns)
+        except Exception:
+            pass
+
+    ct_key = "[Content_Types].xml"
+    if ct_key in cleaned:
+        try:
+            ct_root, ct_ns = parse_xml_preserving_namespaces(cleaned[ct_key])
+            for ov in list(ct_root):
+                if "calcChain" in ov.attrib.get("PartName", ""):
+                    ct_root.remove(ov)
+            cleaned[ct_key] = serialize_xml_preserving_namespaces(ct_root, ct_ns)
+        except Exception:
+            pass
+
+    return cleaned
+
+
 def atomic_write_zip(path: Path, files: dict[str, bytes]) -> None:
     """Escribe un diccionario de archivos en un contenedor ZIP (.xlsx) de forma atómica."""
     path = Path(path)
+    files_to_write = _strip_stale_calc_chain(files)
     temp_path = path.with_suffix(path.suffix + ".tmp")
     try:
         with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
-            for name, content in files.items():
+            for name, content in files_to_write.items():
                 zout.writestr(name, content)
         temp_path.replace(path)
     except PermissionError as exc:

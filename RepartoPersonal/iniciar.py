@@ -922,6 +922,14 @@ class MainWindow(QMainWindow):
                 self.tab_secuencias.load_data()
 
     def closeEvent(self, event):
+        if hasattr(self, "thread") and self.thread.isRunning():
+            QMessageBox.information(
+                self,
+                "Cálculo en curso",
+                "Espere unos segundos a que finalice la generación del cuadrante antes de cerrar la ventana.",
+            )
+            event.ignore()
+            return
         if self._prompt_save_unsaved_changes("cerrar la aplicación"):
             event.accept()
         else:

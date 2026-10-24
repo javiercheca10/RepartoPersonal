@@ -361,6 +361,7 @@ class PuestosDotacionesDialog(QDialog):
         self.resize(720, 500)
         self.positions = list(positions)
         self.rules = {k: dict(v) for k, v in rules.items()}
+        self.renamed_map: dict[str, str] = {}
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -455,9 +456,10 @@ class PuestosDotacionesDialog(QDialog):
             mt = r_info.get("min_t", tt)
             prio = r_info.get("priority", 0)
 
-            # Col 0: Código
+            # Col 0: Código (guarda orig_code para migrar competencias si se renombra)
             c_code = QLineEdit(pos)
             c_code.setMaxLength(8)
+            c_code.setProperty("orig_code", pos)
             self.table.setCellWidget(row, 0, c_code)
 
             # Col 1: Obj M
@@ -552,10 +554,12 @@ class PuestosDotacionesDialog(QDialog):
     def _on_save(self):
         new_positions = []
         new_rules = {}
+        renamed_map: dict[str, str] = {}
 
         for r in range(self.table.rowCount()):
             code_w = self.table.cellWidget(r, 0)
             code = code_w.text().strip().upper() if code_w else ""
+            orig_code = str(code_w.property("orig_code") or "").strip().upper() if code_w else ""
             if not code:
                 QMessageBox.warning(self, "Código vacío", f"La fila {r + 1} no tiene código de puesto.")
                 return
@@ -563,6 +567,8 @@ class PuestosDotacionesDialog(QDialog):
                 QMessageBox.warning(self, "Código duplicado", f"El código '{code}' aparece más de una vez.")
                 return
             new_positions.append(code)
+            if orig_code and orig_code != code:
+                renamed_map[orig_code] = code
 
             tm = self.table.cellWidget(r, 1).value()
             tt = self.table.cellWidget(r, 2).value()
@@ -576,7 +582,11 @@ class PuestosDotacionesDialog(QDialog):
             if mt > tt:
                 mt = tt
 
-            prev_name = self.rules.get(code, {}).get("name", code)
+            prev_name = (
+                self.rules.get(code, {}).get("name")
+                or (self.rules.get(orig_code, {}).get("name") if orig_code else None)
+                or code
+            )
             new_rules[code] = {
                 "name": prev_name,
                 "target_m": tm,
@@ -588,10 +598,14 @@ class PuestosDotacionesDialog(QDialog):
 
         self.positions = new_positions
         self.rules = new_rules
+        self.renamed_map = renamed_map
         self.accept()
 
     def get_data(self) -> tuple[tuple[str, ...], dict[str, dict]]:
         return tuple(self.positions), self.rules
+
+    def get_renamed_map(self) -> dict[str, str]:
+        return dict(self.renamed_map)
 
 
 class TrabajadoresTab(QWidget):
@@ -890,16 +904,27 @@ class TrabajadoresTab(QWidget):
         dlg = PuestosDotacionesDialog(self.positions, self.rules, parent=self)
         if dlg.exec() == QDialog.Accepted:
             new_positions, new_rules = dlg.get_data()
+            renamed_map = dlg.get_renamed_map()
             self.positions = new_positions
             self.rules = new_rules
 
-            # Actualizar competencias de trabajadores actuales para el nuevo catálogo
+            # Actualizar competencias de trabajadores actuales para el nuevo catálogo (preservando renombrados N3)
             for w in self.workers:
+                for old_code, new_code in renamed_map.items():
+                    if old_code in w.skills and new_code not in w.skills:
+                        w.skills[new_code] = w.skills.pop(old_code)
+                    w.preference_order = [
+                        (new_code if p == old_code else p) for p in w.preference_order
+                    ]
                 for p in new_positions:
                     if p not in w.skills:
                         w.skills[p] = ""
                 w.skills = {p: st for p, st in w.skills.items() if p in new_positions}
-                w.preference_order = [p for p in w.preference_order if p in new_positions]
+                seen_prefs: list[str] = []
+                for p in w.preference_order:
+                    if p in new_positions and w.skills.get(p) == "X" and p not in seen_prefs:
+                        seen_prefs.append(p)
+                w.preference_order = seen_prefs
 
             self.rebuild_position_chips(self.positions)
             if self.current_worker:
@@ -1088,10 +1113,20 @@ class TrabajadoresTab(QWidget):
         self._render_master_list()
         if self.workers_list.count() > 0:
             self.workers_list.setCurrentRow(0)
+        else:
+            self._on_worker_selected(-1)
 
     def _on_worker_selected(self, row: int):
         if row < 0 or row >= self.workers_list.count():
+            self.current_worker = None
+            self.right_panel.setEnabled(False)
+            self.worker_name_lbl.setText("Sin selección")
+            self.worker_sub_lbl.setText("Seleccione un profesional de la lista")
+            for chip in self.chip_widgets.values():
+                chip.set_state("")
+            self.pref_list.clear()
             return
+        self.right_panel.setEnabled(True)
         item = self.workers_list.item(row)
         worker: EditableWorker = item.data(Qt.UserRole)
         self.current_worker = worker

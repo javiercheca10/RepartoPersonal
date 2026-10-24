@@ -97,7 +97,10 @@ def load_editable_workers(xlsx_path: str | Path) -> WorkerList:
     # Detectar columnas en la cabecera (Fila 3 de Excel -> índice 2)
     header_row = 2
     col_name = 1
-    col_baja = next((c for c in range(max_col + 1) if "BAJA" in str(cells.get((header_row, c)) or "").upper()), 2)
+    col_baja = next(
+        (c for c in range(max_col + 1) if "BAJA" in str(cells.get((header_row, c)) or "").upper()),
+        None,
+    )
 
     pos_cols = [c for c in range(max_col + 1) if str(cells.get((header_row, c)) or "").strip().upper() in positions]
     k = len(positions)
@@ -115,10 +118,12 @@ def load_editable_workers(xlsx_path: str | Path) -> WorkerList:
         name_val = cells.get((r, col_name))
         if not name_val or not str(name_val).strip():
             continue
-        name = str(name_val).strip()
+        name = " ".join(str(name_val).strip().split())
+        if any(term in name.upper() for term in ("APELLIDOS", "NOMBRE", "FICHA", "TOTAL")):
+            continue
 
-        # Comprobar estado de baja
-        baja_val = str(cells.get((r, col_baja)) or "").strip().upper()
+        # Comprobar estado de baja solo si existe columna BAJA explícita
+        baja_val = str(cells.get((r, col_baja)) or "").strip().upper() if col_baja is not None else ""
         is_baja = baja_val in ("X", "S", "SI", "1", "TRUE", "V")
 
         skills: dict[str, str] = {}
@@ -191,6 +196,16 @@ def save_editable_workers(
 
     # Copia de seguridad inmediata (.bak) y rotativa con fecha (copias/)
     create_rotating_backup(path)
+
+    # Leer bytes originales y celdas pre-resueltas (incluyendo sharedStrings si Excel guardó el archivo)
+    raw_xlsx_bytes = path.read_bytes()
+    s2_parsed_cells: dict[tuple[int, int], object] = {}
+    try:
+        _, s2_parsed_cells = _parse_xlsx_cells(raw_xlsx_bytes, sheet_name_contains="Guía")
+        if not s2_parsed_cells:
+            _, s2_parsed_cells = _parse_xlsx_cells(raw_xlsx_bytes, sheet_name_contains="Reglas")
+    except Exception:
+        s2_parsed_cells = {}
 
     # Leer archivo XLSX existente
     with zipfile.ZipFile(path, "r") as zin:
@@ -328,10 +343,56 @@ def save_editable_workers(
 
                 r_el[:] = sorted(r_el, key=lambda c: _col_idx_from_ref(c.attrib.get("r", "A1")))
 
-            # Actualizar dimensión
+            # Actualizar dimensión, anchos de columna (<cols>) y celdas combinadas (<mergeCells>) en Hoja 1 (N5)
+            k_pos = len(positions)
+            last_col_idx = 2 + 2 * k_pos
             dim = sheet_root.find(f"{{{MAIN}}}dimension")
             if dim is not None:
-                dim.set("ref", f"A1:{_col_letter(2 + 2 * len(positions))}{max(4, 3 + len(workers))}")
+                dim.set("ref", f"A1:{_col_letter(last_col_idx)}{max(4, 3 + len(workers))}")
+
+            cols_parent = sheet_root.find(f"{{{MAIN}}}cols")
+            if cols_parent is not None:
+                for col_el in list(cols_parent):
+                    if int(col_el.attrib.get("min", "0")) >= 3:
+                        col_el.set("max", str(last_col_idx + 1))
+
+            r1_el = sheet_data.find(f"{{{MAIN}}}row[@r='1']")
+            r2_el = sheet_data.find(f"{{{MAIN}}}row[@r='2']")
+            if r1_el is not None and r2_el is not None and k_pos >= 1:
+                c1_cell = r1_el.find(f"{{{MAIN}}}c[@r='C1']")
+                c2_cell = r2_el.find(f"{{{MAIN}}}c[@r='C2']")
+                s_r1 = c1_cell.attrib.get("s", "18") if c1_cell is not None else "18"
+                s_r2 = c2_cell.attrib.get("s", "22") if c2_cell is not None else "22"
+                _set_cell(r1_el, 2, 1, "ESTADO", style=s_r1)
+                _set_cell(r2_el, 2, 2, "X = De baja", style=s_r2)
+                _set_cell(r1_el, 3, 1, "CONOCIMIENTOS Y VETOS POR PUESTO", style=s_r1)
+                _set_cell(r2_el, 3, 2, "X = Sabe el puesto  ·  Vacío = No sabe  ·  V = Vetado", style=s_r2)
+                _set_cell(r1_el, 3 + k_pos, 1, "ORDEN DE PREFERENCIA (1 = FAVORITO)", style=s_r1)
+                _set_cell(r2_el, 3 + k_pos, 2, "Numerar de 1 a N los puestos sabidos según preferencia", style=s_r2)
+                for rx_el in (r1_el, r2_el):
+                    for c_el in list(rx_el):
+                        if _col_idx_from_ref(c_el.attrib.get("r", "A1")) > last_col_idx:
+                            rx_el.remove(c_el)
+                    rx_el[:] = sorted(rx_el, key=lambda c: _col_idx_from_ref(c.attrib.get("r", "A1")))
+
+            mc_parent = sheet_root.find(f"{{{MAIN}}}mergeCells")
+            if mc_parent is not None and k_pos >= 1:
+                for ch in list(mc_parent):
+                    mc_parent.remove(ch)
+                new_merges = ["A1:B1", "A2:B2"]
+                if k_pos > 1:
+                    end_sk = _col_letter(2 + k_pos)
+                    start_pr = _col_letter(3 + k_pos)
+                    end_pr = _col_letter(2 + 2 * k_pos)
+                    new_merges.extend([
+                        f"D1:{end_sk}1",
+                        f"D2:{end_sk}2",
+                        f"{start_pr}1:{end_pr}1",
+                        f"{start_pr}2:{end_pr}2",
+                    ])
+                mc_parent.set("count", str(len(new_merges)))
+                for m_ref in new_merges:
+                    ET.SubElement(mc_parent, f"{{{MAIN}}}mergeCell", {"ref": m_ref})
 
             files[sheet1_path] = serialize_xml_preserving_namespaces(sheet_root, ns_map1)
 
@@ -404,6 +465,7 @@ def save_editable_workers(
             s2_left = s2_c1.attrib.get("s", "30") if s2_c1 is not None else "30"
 
             # Separar filas de catálogo respecto al bloque inferior ("CONCEPTOS CLAVE...")
+            # Usa s2_parsed_cells para soportar celdas t="s" (sharedStrings) creadas por Microsoft Excel (N2)
             footer_rows: list[ET.Element] = []
             in_footer = False
             old_legend_start = None
@@ -411,7 +473,12 @@ def save_editable_workers(
                 r_n = int(r_el.attrib.get("r", 0))
                 if r_n < 4:
                     continue
-                first_txt = _cell_text(r_el.find(f"{{{MAIN}}}c[@r='A{r_n}']"))
+                parsed_val = s2_parsed_cells.get((r_n - 1, 0))
+                first_txt = (
+                    str(parsed_val).strip()
+                    if parsed_val is not None
+                    else _cell_text(r_el.find(f"{{{MAIN}}}c[@r='A{r_n}']"))
+                )
                 if not in_footer and (not first_txt or "CONCEPTOS CLAVE" in first_txt.upper()):
                     in_footer = True
                     old_legend_start = r_n
