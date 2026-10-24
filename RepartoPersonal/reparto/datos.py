@@ -503,15 +503,15 @@ def detect_cycle_weeks(xlsx_path: str | Path, default_weeks: int = 24) -> int:
             name_clean = _normalize_name(name_val)
             if any(term in name_clean for term in ("APELLIDOS", "NOMBRE", "TOTAL", "PUESTOS", "SEMANA")):
                 continue
-            c = 2
-            while c < 400:
+            last_mark_col = 1
+            for c in range(2, 400):
                 raw = str(cells.get((r, c)) or "").strip().upper()
-                if raw in ("M", "T", "D", "R", ""):
-                    c += 1
-                else:
+                if raw in ("M", "T", "D", "R"):
+                    last_mark_col = c
+                elif raw != "":
                     break
-            if (c - 2) >= 7:
-                day_counts.append((c - 2) // 7)
+            if (last_mark_col - 1) >= 7:
+                day_counts.append((last_mark_col - 1) // 7)
         if day_counts:
             from collections import Counter
             return Counter(day_counts).most_common(1)[0][0]

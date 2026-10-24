@@ -6,7 +6,7 @@ y persistir los cambios directamente en el archivo de secuencias sin openpyxl.
 """
 
 from pathlib import Path
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, QEvent
 from PySide6.QtGui import QColor, QFont, QBrush
 from PySide6.QtWidgets import (
     QWidget,
@@ -14,7 +14,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QComboBox,
     QTableWidget,
+    QTableView,
     QTableWidgetItem,
     QLineEdit,
     QFrame,
@@ -54,6 +56,8 @@ class SecuenciasWidget(QWidget):
         self.cycle_weeks: int = 24
         self.cycle_days: int = 168
         self.is_dirty: bool = False
+        self.active_brush: str | None = None
+        self.brush_buttons: dict[str | None, QPushButton] = {}
 
         self._init_ui()
         self.load_data()
@@ -152,6 +156,27 @@ class SecuenciasWidget(QWidget):
         self.search_input.textChanged.connect(self._on_search_changed)
         tools_row.addWidget(self.search_input, 1)
 
+        self.week_combo = QComboBox()
+        self.week_combo.setToolTip("Saltar directamente a una semana concreta del ciclo o a los totales finales.")
+        self.week_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #F8FAFC;
+                color: #0F172A;
+                font-size: 13px;
+                font-weight: 600;
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 6px 12px;
+                min-width: 175px;
+            }
+            QComboBox:hover {
+                border-color: #94A3B8;
+                background-color: #F1F5F9;
+            }
+        """)
+        self.week_combo.currentIndexChanged.connect(self._on_week_selected)
+        tools_row.addWidget(self.week_combo)
+
         self.reload_btn = QPushButton("🔄 Recargar")
         self.reload_btn.setToolTip("Descarta cambios sin guardar y recarga las secuencias desde el archivo Excel.")
         self.reload_btn.setStyleSheet("""
@@ -192,6 +217,33 @@ class SecuenciasWidget(QWidget):
         tools_row.addWidget(self.save_btn)
 
         h_layout.addLayout(tools_row)
+
+        # Fila 3: Modo Pincel / Clic rápido para editar turnos
+        brush_row = QHBoxLayout()
+        brush_row.setSpacing(8)
+        brush_lbl = QLabel("Edición rápida:")
+        brush_lbl.setStyleSheet("font-size: 12px; font-weight: 600; color: #475569;")
+        brush_row.addWidget(brush_lbl)
+
+        brush_specs = [
+            (None, "⌨️ Teclado / Espacio", "Doble clic para escribir o Barra espaciadora para alternar M ➔ T ➔ D ➔ R"),
+            ("M", "🖌️ Pintar M (Mañana)", "Haga clic en cualquier día para asignarle Mañana (M)"),
+            ("T", "🖌️ Pintar T (Tarde)", "Haga clic en cualquier día para asignarle Tarde (T)"),
+            ("D", "🖌️ Pintar D (Descanso)", "Haga clic en cualquier día para asignarle Descanso (D)"),
+            ("R", "🖌️ Pintar R (Refuerzo)", "Haga clic en cualquier día para asignarle Refuerzo (R)"),
+        ]
+        for mode_key, btn_text, tip in brush_specs:
+            btn = QPushButton(btn_text)
+            btn.setToolTip(tip)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _checked=False, mk=mode_key: self._set_brush_mode(mk))
+            self.brush_buttons[mode_key] = btn
+            brush_row.addWidget(btn)
+
+        brush_row.addStretch()
+        h_layout.addLayout(brush_row)
+        self._update_brush_buttons_style()
+
         layout.addWidget(header_card)
 
         # 2. Notificación temporal auto-desvaneciente
@@ -236,6 +288,43 @@ class SecuenciasWidget(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.table.itemChanged.connect(self._on_item_changed)
+        self.table.cellClicked.connect(self._on_cell_clicked)
+        self.table.installEventFilter(self)
+
+        # Vista superpuesta fija para mantener inmovilizadas las columnas N.º y Profesional al hacer scroll horizontal
+        self.frozen_table = QTableView(self.table)
+        self.frozen_table.setObjectName("frozenSeqTable")
+        self.frozen_table.setStyleSheet("""
+            QTableView#frozenSeqTable {
+                background-color: #FFFFFF;
+                border: none;
+                border-right: 2px solid #CBD5E1;
+                gridline-color: #F1F5F9;
+                font-size: 12px;
+                selection-background-color: #E0F2FE;
+                selection-color: #0369A1;
+            }
+            QTableView#frozenSeqTable QHeaderView::section {
+                background-color: #F8FAFC;
+                color: #475569;
+                font-weight: 600;
+                font-size: 11px;
+                border: 1px solid #E2E8F0;
+                padding: 4px;
+            }
+        """)
+        self.frozen_table.setAlternatingRowColors(True)
+        self.frozen_table.setFocusPolicy(Qt.NoFocus)
+        self.frozen_table.verticalHeader().hide()
+        self.frozen_table.horizontalHeader().setFixedHeight(self.table.horizontalHeader().height())
+        self.frozen_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.frozen_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.frozen_table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.verticalScrollBar().valueChanged.connect(self.frozen_table.verticalScrollBar().setValue)
+        self.frozen_table.verticalScrollBar().valueChanged.connect(self.table.verticalScrollBar().setValue)
+        self.table.horizontalHeader().sectionResized.connect(self._on_main_section_resized)
 
         layout.addWidget(self.table, 1)
 
@@ -363,7 +452,144 @@ class SecuenciasWidget(QWidget):
             self._update_row_totals(row_idx, rec)
 
         self.table.blockSignals(False)
+        self._populate_week_combo()
+        self._sync_frozen_table()
         self._on_search_changed(self.search_input.text())
+
+    def _set_brush_mode(self, mode_key: str | None):
+        """Activa o desactiva el modo pincel para pintar turnos con un solo clic."""
+        self.active_brush = mode_key
+        self._update_brush_buttons_style()
+
+    def _update_brush_buttons_style(self):
+        """Actualiza el aspecto visual de los botones de edición rápida (pincel)."""
+        palette = {
+            None: ("#F8FAFC", "#334155", "#CBD5E1", "#0F172A", "#FFFFFF", "#0F172A"),
+            "M": ("#F0F9FF", "#0369A1", "#BAE6FD", "#0284C7", "#FFFFFF", "#0369A1"),
+            "T": ("#FFF7ED", "#C2410C", "#FED7AA", "#EA580C", "#FFFFFF", "#C2410C"),
+            "D": ("#F8FAFC", "#475569", "#CBD5E1", "#475569", "#FFFFFF", "#334155"),
+            "R": ("#F0FDF4", "#15803D", "#BBF7D0", "#16A34A", "#FFFFFF", "#15803D"),
+        }
+        for mk, btn in self.brush_buttons.items():
+            bg, fg, border, act_bg, act_fg, act_border = palette[mk]
+            if self.active_brush == mk:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {act_bg};
+                        color: {act_fg};
+                        border: 1.5px solid {act_border};
+                        border-radius: 6px;
+                        padding: 4px 10px;
+                        font-size: 12px;
+                        font-weight: 700;
+                    }}
+                """)
+            else:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {bg};
+                        color: {fg};
+                        border: 1px solid {border};
+                        border-radius: 6px;
+                        padding: 4px 10px;
+                        font-size: 12px;
+                        font-weight: 600;
+                    }}
+                    QPushButton:hover {{
+                        border-color: {act_border};
+                    }}
+                """)
+
+    def _populate_week_combo(self):
+        """Rellena el selector de salto rápido por semana del ciclo."""
+        self.week_combo.blockSignals(True)
+        self.week_combo.clear()
+        for w in range(1, self.cycle_weeks + 1):
+            d_start = (w - 1) * 7 + 1
+            d_end = w * 7
+            self.week_combo.addItem(f"📅 Ir a: Semana {w} (Días {d_start}–{d_end})", w)
+        self.week_combo.addItem("📊 Ir a: Totales finales", -1)
+        self.week_combo.blockSignals(False)
+
+    def _on_week_selected(self, idx: int):
+        """Desplaza horizontalmente la tabla hasta el inicio de la semana seleccionada."""
+        if idx < 0 or self.table.rowCount() == 0:
+            return
+        val = self.week_combo.itemData(idx)
+        vis_row = 0
+        for r in range(self.table.rowCount()):
+            if not self.table.isRowHidden(r):
+                vis_row = r
+                break
+        if val == -1:
+            target_col = max(2, self.table.columnCount() - 1)
+            item = self.table.item(vis_row, target_col)
+            if item:
+                self.table.scrollToItem(item, QAbstractItemView.PositionAtCenter)
+        elif isinstance(val, int) and val >= 1:
+            target_col = 2 + (val - 1) * 7
+            # Calcular desplazamiento exacto en píxeles para que el lunes de esa semana quede pegado a la columna fija
+            x_offset = sum(self.table.columnWidth(c) for c in range(2, target_col))
+            self.table.horizontalScrollBar().setValue(x_offset)
+
+    def _sync_frozen_table(self):
+        """Sincroniza el modelo y las columnas visibles de la tabla izquierda inmovilizada (N.º y Profesional)."""
+        self.frozen_table.setModel(self.table.model())
+        self.frozen_table.setSelectionModel(self.table.selectionModel())
+        total_cols = self.table.columnCount()
+        for c in range(total_cols):
+            self.frozen_table.setColumnHidden(c, c >= 2)
+        if total_cols >= 2:
+            self.frozen_table.setColumnWidth(0, self.table.columnWidth(0))
+            self.frozen_table.setColumnWidth(1, self.table.columnWidth(1))
+        for r in range(self.table.rowCount()):
+            self.frozen_table.setRowHeight(r, self.table.rowHeight(r))
+        self._update_frozen_geometry()
+        self.frozen_table.show()
+
+    def _on_main_section_resized(self, logical_index: int, _old_size: int, new_size: int):
+        if logical_index in (0, 1):
+            self.frozen_table.setColumnWidth(logical_index, new_size)
+            self._update_frozen_geometry()
+
+    def _update_frozen_geometry(self):
+        if self.table.columnCount() < 2:
+            return
+        frozen_w = self.table.columnWidth(0) + self.table.columnWidth(1)
+        frame_w = self.table.frameWidth()
+        vh_w = self.table.verticalHeader().width() if self.table.verticalHeader().isVisible() else 0
+        hh_h = self.table.horizontalHeader().height()
+        self.frozen_table.horizontalHeader().setFixedHeight(hh_h)
+        self.frozen_table.setGeometry(
+            vh_w + frame_w,
+            frame_w,
+            frozen_w,
+            self.table.viewport().height() + hh_h,
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_frozen_geometry()
+
+    def _on_cell_clicked(self, row: int, col: int):
+        """Si hay un pincel de turno activo, pinta la celda con un solo clic."""
+        if self.active_brush in ("M", "T", "D", "R") and 2 <= col < 2 + self.cycle_days:
+            item = self.table.item(row, col)
+            if item and item.text() != self.active_brush:
+                item.setText(self.active_brush)
+
+    def eventFilter(self, obj, event):
+        """Permite alternar M ➔ T ➔ D ➔ R pulsando la barra espaciadora sobre celdas de días."""
+        if obj is self.table and event.type() == QEvent.KeyPress and event.key() == Qt.Key_Space:
+            cycle_order = {"M": "T", "T": "D", "D": "R", "R": "M"}
+            selected = self.table.selectedItems()
+            day_items = [it for it in selected if 2 <= it.column() < 2 + self.cycle_days]
+            if day_items:
+                for it in day_items:
+                    cur = it.text().strip().upper()
+                    it.setText(cycle_order.get(cur, "M"))
+                return True
+        return super().eventFilter(obj, event)
 
     def _style_cell_item(self, item: QTableWidgetItem, mark: str, d_idx: int):
         """Aplica colores y formato a una celda de marca según su valor y día."""
@@ -467,6 +693,7 @@ class SecuenciasWidget(QWidget):
         for row in range(self.table.rowCount()):
             if not query:
                 self.table.setRowHidden(row, False)
+                self.frozen_table.setRowHidden(row, False)
                 continue
             name_item = self.table.item(row, 1)
             num_item = self.table.item(row, 0)
@@ -474,6 +701,7 @@ class SecuenciasWidget(QWidget):
             num = num_item.text().lower() if num_item else ""
             matches = (query in name) or (query in num)
             self.table.setRowHidden(row, not matches)
+            self.frozen_table.setRowHidden(row, not matches)
 
     def save_data(self) -> bool:
         """Persiste los cambios de secuencias al archivo Excel."""

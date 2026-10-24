@@ -361,6 +361,35 @@ class TestAuditoriaFase1(unittest.TestCase):
         self.assertEqual([r["num"] for r in recs], [str(i) for i in range(1, 10)])
         self.assertEqual([r["row"] for r in recs], list(range(3, 12)))
 
+    def test_ux_improvements_secuencias_and_preferences(self):
+        """Verifica las mejoras UX en Secuencias (columna fija, selector semana, pincel) y flechas ▲/▼ en Preferencias."""
+        from PySide6.QtWidgets import QApplication
+        from reparto.ui_secuencias import SecuenciasWidget
+        from reparto.ui_trabajadores import DraggablePreferenceList
+
+        _app = QApplication.instance() or QApplication([])
+
+        # 1. Flechas ▲ / ▼ en DraggablePreferenceList
+        pref_list = DraggablePreferenceList()
+        pref_list.set_preferences(["EC", "TAC", "RM"])
+        self.assertEqual(pref_list.get_current_order(), ["EC", "TAC", "RM"])
+        pref_list.move_item(2, -1)
+        self.assertEqual(pref_list.get_current_order(), ["EC", "RM", "TAC"])
+        pref_list.move_item(0, 1)
+        self.assertEqual(pref_list.get_current_order(), ["RM", "EC", "TAC"])
+
+        # 2. SecuenciasWidget: columna fija, selector de semana y pincel de un clic
+        seq_w = SecuenciasWidget(self.seq_path)
+        self.assertEqual(seq_w.week_combo.count(), 25)  # 24 semanas + Totales finales
+        self.assertFalse(seq_w.frozen_table.isColumnHidden(0))
+        self.assertFalse(seq_w.frozen_table.isColumnHidden(1))
+        self.assertTrue(seq_w.frozen_table.isColumnHidden(2))
+
+        seq_w._set_brush_mode("R")
+        seq_w._on_cell_clicked(0, 2)  # Pintar día 1 de fila 0 con 'R'
+        self.assertEqual(seq_w.records[0]["sequence"][0], "R")
+        self.assertTrue(seq_w.is_dirty)
+
 
 if __name__ == "__main__":
     unittest.main()

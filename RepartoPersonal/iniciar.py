@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -386,6 +386,51 @@ class MainWindow(QMainWindow):
         self.status_lbl.setAlignment(Qt.AlignCenter)
         plan_layout.addWidget(self.status_lbl)
 
+        # Tarjeta de Avisos de Configuración (visible solo si hay avisos en las plantillas)
+        self.warnings_card = QFrame()
+        self.warnings_card.setObjectName("warningsCard")
+        self.warnings_card.setStyleSheet("""
+            #warningsCard {
+                background-color: #FFFBEB;
+                border: 1px solid #FDE68A;
+                border-radius: 8px;
+                padding: 12px 16px;
+            }
+        """)
+        warn_layout = QVBoxLayout(self.warnings_card)
+        warn_layout.setSpacing(6)
+        warn_header = QHBoxLayout()
+        self.warnings_title_lbl = QLabel("⚠️ Avisos en plantillas de configuración")
+        self.warnings_title_lbl.setStyleSheet("font-size: 13px; font-weight: 700; color: #92400E;")
+        warn_header.addWidget(self.warnings_title_lbl)
+        warn_header.addStretch()
+        go_workers_btn = QPushButton("Revisar en Trabajadores ➔")
+        go_workers_btn.setCursor(Qt.PointingHandCursor)
+        go_workers_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FEF3C7;
+                color: #92400E;
+                border: 1px solid #F59E0B;
+                border-radius: 5px;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 4px 10px;
+            }
+            QPushButton:hover {
+                background-color: #FDE68A;
+            }
+        """)
+        go_workers_btn.clicked.connect(lambda: self.tab_widget.setCurrentIndex(1))
+        warn_header.addWidget(go_workers_btn)
+        warn_layout.addLayout(warn_header)
+
+        self.warnings_body_lbl = QLabel("")
+        self.warnings_body_lbl.setWordWrap(True)
+        self.warnings_body_lbl.setStyleSheet("font-size: 12px; color: #78350F; line-height: 1.3;")
+        warn_layout.addWidget(self.warnings_body_lbl)
+        self.warnings_card.setVisible(False)
+        plan_layout.addWidget(self.warnings_card)
+
         # Tarjeta Resultados
         self.results_card = QFrame()
         self.results_card.setObjectName("resultsCard")
@@ -445,6 +490,12 @@ class MainWindow(QMainWindow):
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
 
         main_layout.addWidget(self.tab_widget, 1)
+
+        # Atajos de teclado globales (Ctrl+S para guardar, Ctrl+F para buscar)
+        self.shortcut_save = QShortcut(QKeySequence("Ctrl+S"), self)
+        self.shortcut_save.activated.connect(self._on_shortcut_save)
+        self.shortcut_search = QShortcut(QKeySequence("Ctrl+F"), self)
+        self.shortcut_search.activated.connect(self._on_shortcut_search)
 
     def _apply_styles(self):
         self.setStyleSheet("""
@@ -721,21 +772,34 @@ class MainWindow(QMainWindow):
             self.generate_btn.setEnabled(False)
             self.status_lbl.setText("Faltan archivos en la carpeta de configuración.")
             self.status_lbl.setToolTip("")
+            if hasattr(self, "warnings_card"):
+                self.warnings_card.setVisible(False)
         else:
             self.generate_btn.setEnabled(True)
             try:
                 _, report = load_all_workers_with_report(self.seq_path, self.pref_path)
                 if report.warnings:
+                    bullets = "\n".join(f"• {w}" for w in report.warnings)
                     self.status_lbl.setText(
-                        f"Listo para generar · {len(report.warnings)} aviso(s) en configuración (pase el ratón para ver)"
+                        f"Listo para generar · {len(report.warnings)} aviso(s) en configuración"
                     )
-                    self.status_lbl.setToolTip("\n".join(f"• {w}" for w in report.warnings))
+                    self.status_lbl.setToolTip(bullets)
+                    if hasattr(self, "warnings_card"):
+                        self.warnings_title_lbl.setText(
+                            f"⚠️ {len(report.warnings)} aviso(s) detectado(s) en las plantillas"
+                        )
+                        self.warnings_body_lbl.setText(bullets)
+                        self.warnings_card.setVisible(True)
                 else:
                     self.status_lbl.setText("Listo para generar.")
                     self.status_lbl.setToolTip("")
+                    if hasattr(self, "warnings_card"):
+                        self.warnings_card.setVisible(False)
             except Exception:
                 self.status_lbl.setText("Listo para generar.")
                 self.status_lbl.setToolTip("")
+                if hasattr(self, "warnings_card"):
+                    self.warnings_card.setVisible(False)
 
     def _prompt_save_unsaved_changes(self, action_desc: str) -> bool:
         """Verifica si hay cambios sin guardar en Trabajadores o Secuencias antes de una acción crítica."""
@@ -925,6 +989,31 @@ class MainWindow(QMainWindow):
         elif index == 2 and hasattr(self, "tab_secuencias"):
             if not self.tab_secuencias.is_dirty:
                 self.tab_secuencias.load_data()
+
+    def _on_shortcut_save(self):
+        """Atajo Ctrl+S: guarda los cambios en la pestaña activa (o en las que tengan cambios pendientes)."""
+        idx = self.tab_widget.currentIndex()
+        if idx == 1 and hasattr(self, "tab_trabajadores"):
+            self.tab_trabajadores.save_data()
+        elif idx == 2 and hasattr(self, "tab_secuencias"):
+            self.tab_secuencias.save_data()
+        else:
+            if hasattr(self, "tab_trabajadores") and self.tab_trabajadores.is_dirty:
+                self.tab_trabajadores.save_data()
+            if hasattr(self, "tab_secuencias") and self.tab_secuencias.is_dirty:
+                self.tab_secuencias.save_data()
+
+    def _on_shortcut_search(self):
+        """Atajo Ctrl+F: enfoca el buscador de la pestaña activa."""
+        idx = self.tab_widget.currentIndex()
+        if idx == 2 and hasattr(self, "tab_secuencias"):
+            self.tab_secuencias.search_input.setFocus()
+            self.tab_secuencias.search_input.selectAll()
+        elif hasattr(self, "tab_trabajadores"):
+            if idx == 0:
+                self.tab_widget.setCurrentIndex(1)
+            self.tab_trabajadores.search_input.setFocus()
+            self.tab_trabajadores.search_input.selectAll()
 
     def closeEvent(self, event):
         if hasattr(self, "thread") and self.thread.isRunning():

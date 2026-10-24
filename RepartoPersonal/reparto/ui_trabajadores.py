@@ -271,15 +271,77 @@ class DraggablePreferenceList(QListWidget):
 
     def dropEvent(self, event):
         super().dropEvent(event)
-        self._refresh_rank_labels()
-        self.order_changed.emit(self.get_current_order())
+        order = self.get_current_order()
+        self.set_preferences(order)
+        self.order_changed.emit(order)
 
     def set_preferences(self, positions_in_order: list[str]):
         self.clear()
+        total = len(positions_in_order)
         for idx, pos in enumerate(positions_in_order, start=1):
             item = QListWidgetItem(f"{idx}º — {pos}")
             item.setData(Qt.UserRole, pos)
             self.addItem(item)
+            self._attach_row_buttons(item, idx - 1, total)
+
+    def _attach_row_buttons(self, item: QListWidgetItem, row_idx: int, total: int):
+        row_widget = QWidget()
+        row_widget.setStyleSheet("background: transparent; border: none;")
+        h_layout = QHBoxLayout(row_widget)
+        h_layout.setContentsMargins(0, 0, 6, 0)
+        h_layout.setSpacing(4)
+        h_layout.addStretch()
+
+        btn_style = """
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #475569;
+                border: 1px solid #CBD5E1;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 2px 7px;
+                min-width: 24px;
+                max-height: 22px;
+            }
+            QPushButton:hover:enabled {
+                background-color: #EFF6FF;
+                color: #1D4ED8;
+                border-color: #93C5FD;
+            }
+            QPushButton:disabled {
+                background-color: #F8FAFC;
+                color: #CBD5E1;
+                border-color: #E2E8F0;
+            }
+        """
+
+        up_btn = QPushButton("▲")
+        up_btn.setToolTip("Subir prioridad")
+        up_btn.setCursor(Qt.PointingHandCursor)
+        up_btn.setEnabled(row_idx > 0)
+        up_btn.setStyleSheet(btn_style)
+        up_btn.clicked.connect(lambda _checked=False, r=row_idx: self.move_item(r, -1))
+
+        down_btn = QPushButton("▼")
+        down_btn.setToolTip("Bajar prioridad")
+        down_btn.setCursor(Qt.PointingHandCursor)
+        down_btn.setEnabled(row_idx < total - 1)
+        down_btn.setStyleSheet(btn_style)
+        down_btn.clicked.connect(lambda _checked=False, r=row_idx: self.move_item(r, 1))
+
+        h_layout.addWidget(up_btn)
+        h_layout.addWidget(down_btn)
+        self.setItemWidget(item, row_widget)
+
+    def move_item(self, row_idx: int, delta: int):
+        order = self.get_current_order()
+        new_idx = row_idx + delta
+        if 0 <= row_idx < len(order) and 0 <= new_idx < len(order):
+            order[row_idx], order[new_idx] = order[new_idx], order[row_idx]
+            self.set_preferences(order)
+            self.setCurrentRow(new_idx)
+            self.order_changed.emit(order)
 
     def get_current_order(self) -> list[str]:
         return [self.item(i).data(Qt.UserRole) for i in range(self.count())]
@@ -784,7 +846,7 @@ class TrabajadoresTab(QWidget):
         prefs_sec.setSpacing(6)
         sec2_title = QLabel("Orden de Preferencia de Puestos")
         sec2_title.setObjectName("cardTitle")
-        sec2_hint = QLabel("Arrastre los puestos sabidos para colocarlos en el orden de mayor a menor preferencia.")
+        sec2_hint = QLabel("Arrastre los puestos o use las flechas (▲ / ▼) para colocarlos de mayor a menor preferencia.")
         sec2_hint.setObjectName("hintLabel")
         prefs_sec.addWidget(sec2_title)
         prefs_sec.addWidget(sec2_hint)
