@@ -667,6 +667,11 @@ class MainWindow(QMainWindow):
 
         self.seq_path_lbl.setText(self.seq_path.name)
         self.pref_path_lbl.setText(self.pref_path.name)
+        if hasattr(self, "tab_trabajadores"):
+            self.tab_trabajadores.pref_path = self.pref_path
+            self.tab_trabajadores.seq_path = self.seq_path
+        if hasattr(self, "tab_secuencias"):
+            self.tab_secuencias.seq_path = self.seq_path
 
         seq_ok = self.seq_path.exists()
         pref_ok = self.pref_path.exists()
@@ -749,7 +754,7 @@ class MainWindow(QMainWindow):
         msg_box.setText(f"Hay cambios sin guardar en {tabs_str}.")
         msg_box.setInformativeText(f"¿Desea guardarlos en Excel antes de {action_desc}?")
         save_btn = msg_box.addButton("Guardar y continuar", QMessageBox.AcceptRole)
-        discard_btn = msg_box.addButton("Continuar sin guardar", QMessageBox.DestructiveRole)
+        discard_btn = msg_box.addButton("Descartar cambios y continuar", QMessageBox.DestructiveRole)
         cancel_btn = msg_box.addButton("Cancelar", QMessageBox.RejectRole)
         msg_box.setDefaultButton(save_btn)
         msg_box.exec()

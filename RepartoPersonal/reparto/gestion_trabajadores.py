@@ -551,6 +551,10 @@ def save_editable_workers(
                             mc_el.set("ref", f"{m.group(1)}{r1}:{m.group(3)}{r2}")
 
             s2_data[:] = sorted(s2_data, key=lambda r: int(r.attrib.get("r", 0)))
+            s2_dim = s2_root.find(f"{{{MAIN}}}dimension")
+            if s2_dim is not None and len(s2_data) > 0:
+                max_s2_r = max(int(r.attrib.get("r", 1)) for r in s2_data)
+                s2_dim.set("ref", f"A1:I{max_s2_r}")
             files[sheet2_path] = serialize_xml_preserving_namespaces(s2_root, ns_map2)
 
     # Escritura atómica con manejo explícito de bloqueo en Excel

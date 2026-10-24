@@ -1133,6 +1133,44 @@ def save_sequence_records(
 
         sheet_data[:] = sorted(sheet_data, key=lambda r: int(r.attrib.get("r", 0)))
 
+        # Si se sincronizó la plantilla (altas/bajas), renumerar filas de trabajadores (4..3+N) y N.º (1..N) sin huecos
+        if sync_roster:
+            header_rows = []
+            worker_rows = []
+            for r_el in list(sheet_data.findall(f"{{{MAIN}}}row")):
+                r_num = int(r_el.attrib.get("r", 0))
+                if r_num <= 3:
+                    header_rows.append(r_el)
+                else:
+                    # Comprobar si la fila tiene nombre en Col B (índice 1)
+                    has_name = False
+                    for c_el in r_el.findall(f"{{{MAIN}}}c"):
+                        if _col_idx_from_ref(c_el.attrib.get("r", "A1")) == 1:
+                            has_name = True
+                            break
+                    if has_name:
+                        worker_rows.append(r_el)
+            sheet_data[:] = header_rows
+            for idx_w, r_el in enumerate(worker_rows, 1):
+                new_r = 3 + idx_w
+                r_el.set("r", str(new_r))
+                for c_el in r_el.findall(f"{{{MAIN}}}c"):
+                    c_idx = _col_idx_from_ref(c_el.attrib.get("r", "A1"))
+                    c_el.set("r", f"{_col_letter(c_idx)}{new_r}")
+                    if c_idx == 0:
+                        for ch in list(c_el):
+                            c_el.remove(ch)
+                        c_el.set("t", "n")
+                        v_a = ET.SubElement(c_el, f"{{{MAIN}}}v")
+                        v_a.text = str(idx_w)
+                sheet_data.append(r_el)
+
+        dim_el = tree.find(f"{{{MAIN}}}dimension")
+        if dim_el is not None and len(sheet_data) > 0:
+            max_r = max(int(r.attrib.get("r", 1)) for r in sheet_data)
+            max_c = 2 + cycle_days + 4
+            dim_el.set("ref", f"A1:{_col_letter(max_c)}{max_r}")
+
     manifest["xl/worksheets/sheet1.xml"] = serialize_xml_preserving_namespaces(tree, ns_map)
     atomic_write_zip(p, manifest)
 

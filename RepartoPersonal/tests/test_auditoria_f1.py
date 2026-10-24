@@ -347,6 +347,20 @@ class TestAuditoriaFase1(unittest.TestCase):
         self.assertEqual(workers[0].name, "CORRETURNOS PURO")
         self.assertEqual(report.sin_secuencia, ())
 
+    def test_r1_sync_sequences_renumbers_rows_contiguously(self):
+        """R1: Al eliminar e insertar trabajadores en secuencias, las filas y N.º quedan contiguos (4..3+N y 1..N)."""
+        from reparto.datos import load_sequence_records
+
+        sync_sequences_roster(
+            self.seq_path,
+            active_worker_names=["TECNICO FICTICIO 01", "TECNICO FICTICIO 11"],
+            removed_worker_names={"TECNICO FICTICIO 02", "TECNICO FICTICIO 05"},
+        )
+        recs, _ = load_sequence_records(self.seq_path)
+        self.assertEqual(len(recs), 9)
+        self.assertEqual([r["num"] for r in recs], [str(i) for i in range(1, 10)])
+        self.assertEqual([r["row"] for r in recs], list(range(3, 12)))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -860,6 +860,10 @@ class TrabajadoresTab(QWidget):
                 preference_order=[],
             )
             self.workers.append(new_worker)
+            if self.search_input.text().strip() and self.search_input.text().strip().upper() not in name.upper():
+                self.search_input.blockSignals(True)
+                self.search_input.clear()
+                self.search_input.blockSignals(False)
             self._render_master_list()
             # Seleccionar nuevo trabajador
             for r in range(self.workers_list.count()):
