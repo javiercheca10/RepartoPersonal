@@ -41,6 +41,7 @@ sys.path.insert(0, str(APP_DIR))
 from reparto.assets import get_app_icon, get_app_pixmap, setup_windows_app_id
 from reparto.datos import (
     cycle_day_matches_weekday,
+    detect_cycle_weeks,
     load_all_workers,
     parse_positions_from_header,
     parse_position_rules,
@@ -49,6 +50,7 @@ from reparto.datos import (
 )
 from reparto.exportadores import export_month_to_excel, export_month_to_pdf
 from reparto.solver import MonthResult, solve_month
+from reparto.ui_secuencias import SecuenciasWidget
 from reparto.ui_trabajadores import TrabajadoresTab
 
 MONTHS_ES = [
@@ -72,6 +74,7 @@ class SolverWorkerThread(QThread):
         pref_path: Path,
         out_dir: Path,
         time_limit: float = 15.0,
+        cycle_weeks: int = 24,
     ):
         super().__init__()
         self.year = year
@@ -81,13 +84,20 @@ class SolverWorkerThread(QThread):
         self.pref_path = pref_path
         self.out_dir = out_dir
         self.time_limit = time_limit
+        self.cycle_weeks = cycle_weeks
 
     def run(self):
         try:
             self.progress_signal.emit("Cargando archivos de configuración y puestos...", 15)
+            cycle_length = self.cycle_weeks * 7
             positions = parse_positions_from_header(self.pref_path)
             rules = parse_position_rules(self.pref_path, positions)
-            workers = load_all_workers(self.seq_path, self.pref_path, positions=positions)
+            workers = load_all_workers(
+                self.seq_path,
+                self.pref_path,
+                positions=positions,
+                cycle_weeks=self.cycle_weeks,
+            )
 
             self.progress_signal.emit("Proyectando calendario laboral y turnos...", 35)
             schedules = project_month(
@@ -97,6 +107,7 @@ class SolverWorkerThread(QThread):
                 workers,
                 positions=positions,
                 position_rules=rules,
+                cycle_length=cycle_length,
             )
 
             self.progress_signal.emit("Optimizando asignación y equidad de puestos con CP-SAT...", 60)
@@ -233,11 +244,11 @@ class MainWindow(QMainWindow):
         seq_row = QHBoxLayout()
         seq_name_box = QVBoxLayout()
         seq_name_box.setSpacing(2)
-        seq_title = QLabel("Secuencias de Turnos (Ciclo de 24 semanas)")
-        seq_title.setObjectName("itemTitle")
+        self.seq_title = QLabel("Secuencias de Turnos")
+        self.seq_title.setObjectName("itemTitle")
         self.seq_path_lbl = QLabel(self.seq_path.name)
         self.seq_path_lbl.setObjectName("pathLabel")
-        seq_name_box.addWidget(seq_title)
+        seq_name_box.addWidget(self.seq_title)
         seq_name_box.addWidget(self.seq_path_lbl)
 
         self.seq_status_lbl = QLabel("Comprobando...")
@@ -296,6 +307,7 @@ class MainWindow(QMainWindow):
             self.month_combo.addItem(name, num)
         today = date.today()
         self.month_combo.setCurrentIndex(today.month - 1)
+        self.month_combo.currentIndexChanged.connect(self._on_period_changed)
         mes_box.addWidget(mes_lbl)
         mes_box.addWidget(self.month_combo)
         form_layout.addLayout(mes_box)
@@ -308,21 +320,19 @@ class MainWindow(QMainWindow):
         for y in range(2026, 2031):
             self.year_combo.addItem(str(y), y)
         self.year_combo.setCurrentText(str(today.year if today.year >= 2026 else 2026))
+        self.year_combo.currentIndexChanged.connect(self._on_period_changed)
         year_box.addWidget(year_lbl)
         year_box.addWidget(self.year_combo)
         form_layout.addLayout(year_box)
 
         cycle_box = QVBoxLayout()
         cycle_box.setSpacing(6)
-        cycle_lbl = QLabel("Día del Ciclo en Día 1 (1 a 168)")
-        cycle_lbl.setObjectName("fieldLabel")
+        self.cycle_lbl = QLabel("Día del Ciclo en Día 1")
+        self.cycle_lbl.setObjectName("fieldLabel")
         self.cycle_combo = QComboBox()
         self.cycle_combo.setEditable(True)
-        for d in range(1, 169):
-            self.cycle_combo.addItem(str(d), d)
-        self.cycle_combo.setCurrentIndex(0)
-        self.cycle_combo.setToolTip("Indique qué día del ciclo de 24 semanas (1 a 168) corresponde al día 1 del mes a planificar.")
-        cycle_box.addWidget(cycle_lbl)
+        self.cycle_combo.setToolTip("Indique qué día del ciclo corresponde al día 1 del mes a planificar.")
+        cycle_box.addWidget(self.cycle_lbl)
         cycle_box.addWidget(self.cycle_combo)
         form_layout.addLayout(cycle_box)
 
@@ -406,6 +416,12 @@ class MainWindow(QMainWindow):
         self.tab_trabajadores = TrabajadoresTab(self.pref_path)
         self.tab_trabajadores.data_saved.connect(self._on_worker_data_saved)
         self.tab_widget.addTab(self.tab_trabajadores, "Trabajadores")
+
+        # --- PESTAÑA 3: SECUENCIAS DE TURNOS ---
+        self.tab_secuencias = SecuenciasWidget(self.seq_path)
+        self.tab_secuencias.data_saved.connect(self._on_sequence_data_saved)
+        self.tab_widget.addTab(self.tab_secuencias, "Secuencias de Turnos")
+
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
 
         main_layout.addWidget(self.tab_widget, 1)
@@ -638,6 +654,28 @@ class MainWindow(QMainWindow):
         if seq_ok:
             self.seq_status_lbl.setText("Disponible")
             self.seq_status_lbl.setObjectName("badgeOk")
+            cycle_weeks = detect_cycle_weeks(self.seq_path)
+            cycle_days = cycle_weeks * 7
+            self.seq_title.setText(f"Secuencias de Turnos (Ciclo de {cycle_weeks} semanas · {cycle_days} días)")
+            self.cycle_lbl.setText(f"Día del Ciclo en Día 1 (1 a {cycle_days})")
+            self.cycle_combo.setToolTip(
+                f"Indique qué día del ciclo de {cycle_weeks} semanas (1 a {cycle_days}) corresponde al día 1 del mes a planificar."
+            )
+            if self.cycle_combo.count() != cycle_days:
+                cur_val = self.cycle_combo.currentData()
+                self.cycle_combo.blockSignals(True)
+                self.cycle_combo.clear()
+                for d in range(1, cycle_days + 1):
+                    self.cycle_combo.addItem(str(d), d)
+                m = self.month_combo.currentData()
+                y = self.year_combo.currentData()
+                suggested = suggest_cycle_day(y, m, cycle_length=cycle_days)
+                idx = self.cycle_combo.findData(suggested)
+                if idx >= 0:
+                    self.cycle_combo.setCurrentIndex(idx)
+                elif cur_val and cur_val <= cycle_days:
+                    self.cycle_combo.setCurrentIndex(cur_val - 1)
+                self.cycle_combo.blockSignals(False)
         else:
             self.seq_status_lbl.setText("No encontrado")
             self.seq_status_lbl.setObjectName("badgeError")
@@ -661,12 +699,27 @@ class MainWindow(QMainWindow):
             self.generate_btn.setEnabled(True)
             self.status_lbl.setText("Listo para generar.")
 
+    def _on_period_changed(self):
+        """Actualiza la sugerencia de día de ciclo al cambiar de mes o año."""
+        cycle_weeks = detect_cycle_weeks(self.seq_path) if self.seq_path.exists() else 24
+        cycle_days = cycle_weeks * 7
+        m = self.month_combo.currentData()
+        y = self.year_combo.currentData()
+        if m and y:
+            suggested = suggest_cycle_day(y, m, cycle_length=cycle_days)
+            idx = self.cycle_combo.findData(suggested)
+            if idx >= 0:
+                self.cycle_combo.setCurrentIndex(idx)
+
     def _on_generate_clicked(self):
         self.generate_btn.setEnabled(False)
         self.results_card.setVisible(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(5)
         self.status_lbl.setText("Iniciando cálculo...")
+
+        cycle_weeks = detect_cycle_weeks(self.seq_path) if self.seq_path.exists() else 24
+        cycle_length = cycle_weeks * 7
 
         month = self.month_combo.currentData()
         year = self.year_combo.currentData()
@@ -685,11 +738,11 @@ class MainWindow(QMainWindow):
             digits = "".join(c for c in txt if c.isdigit())
             start_cycle_day = int(digits) if digits else 1
 
-        start_cycle_day = max(1, min(168, start_cycle_day))
+        start_cycle_day = max(1, min(cycle_length, start_cycle_day))
 
         # Validar si el día del ciclo encaja con el día de la semana real del día 1
-        if not cycle_day_matches_weekday(year, month, start_cycle_day):
-            suggested = suggest_cycle_day(year, month)
+        if not cycle_day_matches_weekday(year, month, start_cycle_day, cycle_length=cycle_length):
+            suggested = suggest_cycle_day(year, month, cycle_length=cycle_length)
             reply = QMessageBox.warning(
                 self,
                 "Aviso de Desalineación del Ciclo",
@@ -716,6 +769,7 @@ class MainWindow(QMainWindow):
             pref_path=self.pref_path,
             out_dir=self.out_dir,
             time_limit=time_limit,
+            cycle_weeks=cycle_weeks,
         )
         self.thread.progress_signal.connect(self._on_progress)
         self.thread.finished_signal.connect(self._on_finished)
@@ -777,15 +831,24 @@ class MainWindow(QMainWindow):
     def _on_worker_data_saved(self):
         self._check_config_files()
 
+    def _on_sequence_data_saved(self):
+        self._check_config_files()
+
     def _on_tab_changed(self, index: int):
-        if index == 1 and hasattr(self, "tab_trabajadores"):
+        if index == 0:
+            self._check_config_files()
+        elif index == 1 and hasattr(self, "tab_trabajadores"):
             self.tab_trabajadores.load_data()
+        elif index == 2 and hasattr(self, "tab_secuencias"):
+            self.tab_secuencias.load_data()
 
     def _open_config_folder(self):
         self._open_folder_path(self.config_dir)
         self._check_config_files()
         if hasattr(self, "tab_trabajadores"):
             self.tab_trabajadores.load_data()
+        if hasattr(self, "tab_secuencias"):
+            self.tab_secuencias.load_data()
 
     def _open_folder(self):
         self._open_folder_path(self.out_dir)

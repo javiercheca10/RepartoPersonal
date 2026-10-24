@@ -358,7 +358,7 @@ class PuestosDotacionesDialog(QDialog):
     def __init__(self, positions: tuple[str, ...], rules: dict[str, dict], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Configurar Catálogo de Puestos y Dotaciones")
-        self.resize(840, 520)
+        self.resize(720, 500)
         self.positions = list(positions)
         self.rules = {k: dict(v) for k, v in rules.items()}
 
@@ -409,15 +409,14 @@ class PuestosDotacionesDialog(QDialog):
         layout.addLayout(hdr_box)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels([
-            "Código", "Denominación del Puesto", "Obj. M", "Obj. T", "Mín. M", "Mín. T", "Criterio de Reducción"
+            "Código", "Obj. M", "Obj. T", "Mín. M", "Mín. T", "Criterio de Reducción"
         ])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        for i in range(2, 6):
+        for i in range(1, 5):
             self.table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         layout.addWidget(self.table, 1)
@@ -450,7 +449,6 @@ class PuestosDotacionesDialog(QDialog):
         self.table.setRowCount(len(self.positions))
         for row, pos in enumerate(self.positions):
             r_info = self.rules.get(pos, {})
-            name = r_info.get("name", pos)
             tm = r_info.get("target_m", 1)
             tt = r_info.get("target_t", 1)
             mm = r_info.get("min_m", tm)
@@ -462,41 +460,37 @@ class PuestosDotacionesDialog(QDialog):
             c_code.setMaxLength(8)
             self.table.setCellWidget(row, 0, c_code)
 
-            # Col 1: Denominación
-            c_name = QLineEdit(name)
-            self.table.setCellWidget(row, 1, c_name)
-
-            # Col 2: Obj M
+            # Col 1: Obj M
             s_tm = QSpinBox()
             s_tm.setRange(0, 30)
             s_tm.setValue(tm)
-            self.table.setCellWidget(row, 2, s_tm)
+            self.table.setCellWidget(row, 1, s_tm)
 
-            # Col 3: Obj T
+            # Col 2: Obj T
             s_tt = QSpinBox()
             s_tt.setRange(0, 30)
             s_tt.setValue(tt)
-            self.table.setCellWidget(row, 3, s_tt)
+            self.table.setCellWidget(row, 2, s_tt)
 
-            # Col 4: Min M
+            # Col 3: Min M
             s_mm = QSpinBox()
             s_mm.setRange(0, 30)
             s_mm.setValue(mm)
-            self.table.setCellWidget(row, 4, s_mm)
+            self.table.setCellWidget(row, 3, s_mm)
 
-            # Col 5: Min T
+            # Col 4: Min T
             s_mt = QSpinBox()
             s_mt.setRange(0, 30)
             s_mt.setValue(mt)
-            self.table.setCellWidget(row, 5, s_mt)
+            self.table.setCellWidget(row, 4, s_mt)
 
-            # Col 6: Prioridad
+            # Col 5: Prioridad
             cb_prio = QComboBox()
             cb_prio.addItem("Estricto (no se reduce)", 0)
             cb_prio.addItem("Reducible Nivel 1 (se reduce primero)", 1)
             cb_prio.addItem("Reducible Nivel 2 (se reduce después de nivel 1)", 2)
             cb_prio.setCurrentIndex(min(2, max(0, prio)))
-            self.table.setCellWidget(row, 6, cb_prio)
+            self.table.setCellWidget(row, 5, cb_prio)
 
     def _on_add_position(self):
         row = self.table.rowCount()
@@ -506,35 +500,32 @@ class PuestosDotacionesDialog(QDialog):
         c_code.setMaxLength(8)
         self.table.setCellWidget(row, 0, c_code)
 
-        c_name = QLineEdit(f"Nuevo Puesto {row + 1}")
-        self.table.setCellWidget(row, 1, c_name)
-
         s_tm = QSpinBox()
         s_tm.setRange(0, 30)
         s_tm.setValue(1)
-        self.table.setCellWidget(row, 2, s_tm)
+        self.table.setCellWidget(row, 1, s_tm)
 
         s_tt = QSpinBox()
         s_tt.setRange(0, 30)
         s_tt.setValue(1)
-        self.table.setCellWidget(row, 3, s_tt)
+        self.table.setCellWidget(row, 2, s_tt)
 
         s_mm = QSpinBox()
         s_mm.setRange(0, 30)
         s_mm.setValue(1)
-        self.table.setCellWidget(row, 4, s_mm)
+        self.table.setCellWidget(row, 3, s_mm)
 
         s_mt = QSpinBox()
         s_mt.setRange(0, 30)
         s_mt.setValue(1)
-        self.table.setCellWidget(row, 5, s_mt)
+        self.table.setCellWidget(row, 4, s_mt)
 
         cb_prio = QComboBox()
         cb_prio.addItem("Estricto (no se reduce)", 0)
         cb_prio.addItem("Reducible Nivel 1 (se reduce primero)", 1)
         cb_prio.addItem("Reducible Nivel 2 (se reduce después de nivel 1)", 2)
         cb_prio.setCurrentIndex(0)
-        self.table.setCellWidget(row, 6, cb_prio)
+        self.table.setCellWidget(row, 5, cb_prio)
 
         self.table.selectRow(row)
 
@@ -573,14 +564,11 @@ class PuestosDotacionesDialog(QDialog):
                 return
             new_positions.append(code)
 
-            name_w = self.table.cellWidget(r, 1)
-            name = name_w.text().strip() if name_w else code
-
-            tm = self.table.cellWidget(r, 2).value()
-            tt = self.table.cellWidget(r, 3).value()
-            mm = self.table.cellWidget(r, 4).value()
-            mt = self.table.cellWidget(r, 5).value()
-            prio = self.table.cellWidget(r, 6).currentData()
+            tm = self.table.cellWidget(r, 1).value()
+            tt = self.table.cellWidget(r, 2).value()
+            mm = self.table.cellWidget(r, 3).value()
+            mt = self.table.cellWidget(r, 4).value()
+            prio = self.table.cellWidget(r, 5).currentData()
 
             # Mínimo no puede ser mayor que el objetivo
             if mm > tm:
@@ -588,8 +576,9 @@ class PuestosDotacionesDialog(QDialog):
             if mt > tt:
                 mt = tt
 
+            prev_name = self.rules.get(code, {}).get("name", code)
             new_rules[code] = {
-                "name": name,
+                "name": prev_name,
                 "target_m": tm,
                 "target_t": tt,
                 "min_m": mm,

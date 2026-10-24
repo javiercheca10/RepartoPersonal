@@ -12,9 +12,13 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from hashlib import sha1
 from io import BytesIO
+import io
 from pathlib import Path
 import posixpath
 import re
+import shutil
+import zipfile
+import xml.etree.ElementTree as ET
 from xml.etree.ElementTree import fromstring
 from zipfile import ZipFile
 
@@ -387,17 +391,107 @@ class LoadReport:
     sin_conocimientos: tuple[str, ...] = ()  # Con ficha pero ningún conocimiento marcado
 
 
+def _col_letter(c_idx: int) -> str:
+    """Convierte índice 0-based a letra de columna (0 -> 'A', 27 -> 'AB')."""
+    res = ""
+    c_idx += 1
+    while c_idx > 0:
+        c_idx, rem = divmod(c_idx - 1, 26)
+        res = chr(65 + rem) + res
+    return res
+
+
+def _col_idx_from_ref(ref: str) -> int:
+    """Extrae el índice de columna (0-based) de una referencia como 'AA12'."""
+    col_str = "".join(ch for ch in ref if ch.isalpha()).upper()
+    idx = 0
+    for ch in col_str:
+        idx = idx * 26 + (ord(ch) - ord("A") + 1)
+    return idx - 1
+
+
 def _normalize_name(raw: str) -> str:
     return " ".join(raw.split()).upper()
 
 
-def load_sequences(xlsx_path: str | Path, warnings: list[str] | None = None) -> dict[str, tuple[str, ...]]:
+def detect_cycle_weeks(xlsx_path: str | Path, default_weeks: int = 24) -> int:
+    """Detecta automáticamente el número de semanas del ciclo a partir del Excel de secuencias."""
+    try:
+        p = Path(xlsx_path)
+        if not p.exists():
+            return default_weeks
+        data = p.read_bytes()
+        _, cells = _parse_xlsx_cells(data, sheet_name_contains="secuencia")
+
+        # 1. Buscar fila con numeración consecutiva 1, 2, 3... a partir de col 2 (Col C)
+        for r in range(6):
+            c = 2
+            consecutive = 0
+            while True:
+                v = cells.get((r, c))
+                try:
+                    if int(v) == consecutive + 1:
+                        consecutive += 1
+                        c += 1
+                        continue
+                except (ValueError, TypeError):
+                    break
+            if consecutive >= 7:
+                return max(1, consecutive // 7)
+
+        # 2. Alternativa: buscar columnas antes de cabeceras de resumen (Mañanas, Tardes, Total...)
+        summary_terms = ("MAÑANA", "TARDE", "DESCANSO", "REFUERZO", "TOTAL", "DÍAS", "DIAS")
+        for r in range(6):
+            for c in range(2, 400):
+                v_str = str(cells.get((r, c)) or "").strip().upper()
+                if any(term in v_str for term in summary_terms):
+                    days = c - 2
+                    if days >= 7:
+                        return max(1, days // 7)
+                    break
+
+        # 3. Alternativa: inspeccionar longitud de columnas con marcas en filas de trabajadores
+        max_row = max((r for r, c in cells), default=0)
+        day_counts = []
+        for r in range(max_row + 1):
+            name_val = cells.get((r, 1))
+            if not isinstance(name_val, str) or not name_val.strip():
+                continue
+            name_clean = _normalize_name(name_val)
+            if any(term in name_clean for term in ("APELLIDOS", "NOMBRE", "TOTAL", "PUESTOS", "SEMANA")):
+                continue
+            c = 2
+            while c < 400:
+                raw = str(cells.get((r, c)) or "").strip().upper()
+                if raw in ("M", "T", "D", "R", ""):
+                    c += 1
+                else:
+                    break
+            if (c - 2) >= 7:
+                day_counts.append((c - 2) // 7)
+        if day_counts:
+            from collections import Counter
+            return Counter(day_counts).most_common(1)[0][0]
+    except Exception:
+        pass
+    return default_weeks
+
+
+def load_sequences(
+    xlsx_path: str | Path,
+    warnings: list[str] | None = None,
+    cycle_weeks: int | None = None,
+) -> dict[str, tuple[str, ...]]:
     """Carga las secuencias de turnos desde el Excel limpio o original.
 
-    Devuelve: {nombre_normalizado: tuple(168 marcas 'M', 'T', 'D', 'R')}.
+    Devuelve: {nombre_normalizado: tuple(marcas 'M', 'T', 'D', 'R')}.
     Celda vacía = descanso. Cualquier otra marca desconocida se trata como descanso y se
     anota en ``warnings`` (si se proporciona la lista).
     """
+    if cycle_weeks is None:
+        cycle_weeks = detect_cycle_weeks(xlsx_path)
+    cycle_days = cycle_weeks * 7
+
     data = Path(xlsx_path).read_bytes()
     _, cells = _parse_xlsx_cells(data, sheet_name_contains="secuencia")
 
@@ -413,10 +507,10 @@ def load_sequences(xlsx_path: str | Path, warnings: list[str] | None = None) -> 
         if any(term in name_clean for term in ("APELLIDOS", "NOMBRE", "SERVICIO", "TOTAL", "PUESTOS", "SEMANA")):
             continue
 
-        # Extraer las 168 marcas (Col C a FO -> indices 2 a 169)
+        # Extraer las marcas del ciclo (Col C en adelante)
         marks = []
         unknown = set()
-        for c in range(2, 170):
+        for c in range(2, 2 + cycle_days):
             raw = str(cells.get((r, c)) or "").strip().upper()
             if raw in ("M", "T", "D", "R"):
                 marks.append(raw)
@@ -526,13 +620,14 @@ def load_all_workers_with_report(
     sequences_path: str | Path,
     preferences_path: str | Path,
     positions: tuple[str, ...] | None = None,
+    cycle_weeks: int | None = None,
 ) -> tuple[tuple[WorkerProfile, ...], LoadReport]:
     """Combina secuencias y ficha en perfiles inmutables e informa de lo que requiere revisión."""
     if positions is None:
         positions = parse_positions_from_header(preferences_path)
 
     warnings: list[str] = []
-    seqs = load_sequences(sequences_path, warnings)
+    seqs = load_sequences(sequences_path, warnings, cycle_weeks=cycle_weeks)
     prefs = load_skills_and_preferences(preferences_path, positions=positions)
 
     workers = []
@@ -598,9 +693,10 @@ def load_all_workers(
     sequences_path: str | Path,
     preferences_path: str | Path,
     positions: tuple[str, ...] | None = None,
+    cycle_weeks: int | None = None,
 ) -> tuple[WorkerProfile, ...]:
     """Combina secuencias de turnos y ficha de conocimientos en perfiles completos e inmutables."""
-    return load_all_workers_with_report(sequences_path, preferences_path, positions=positions)[0]
+    return load_all_workers_with_report(sequences_path, preferences_path, positions=positions, cycle_weeks=cycle_weeks)[0]
 
 
 # --- CICLO Y PROYECCIÓN MENSUAL ---
@@ -608,18 +704,18 @@ def load_all_workers(
 CYCLE_LENGTH = 168  # 24 semanas
 
 
-def cycle_day_matches_weekday(year: int, month: int, start_cycle_day: int) -> bool:
+def cycle_day_matches_weekday(year: int, month: int, start_cycle_day: int, cycle_length: int = CYCLE_LENGTH) -> bool:
     """El ciclo empieza en lunes: el día de ciclo c cae en weekday (c-1) % 7.
 
     Con esta comprobación se evita proyectar una secuencia desfasada respecto al calendario.
     """
-    return (start_cycle_day - 1) % 7 == date(year, month, 1).weekday()
+    return 1 <= start_cycle_day <= cycle_length and (start_cycle_day - 1) % 7 == date(year, month, 1).weekday()
 
 
-def valid_cycle_days(year: int, month: int) -> list[int]:
-    """Días de ciclo (1..168) compatibles con el día de la semana real del día 1 del mes."""
+def valid_cycle_days(year: int, month: int, cycle_length: int = CYCLE_LENGTH) -> list[int]:
+    """Días de ciclo (1..cycle_length) compatibles con el día de la semana real del día 1 del mes."""
     weekday = date(year, month, 1).weekday()
-    return [d for d in range(1, CYCLE_LENGTH + 1) if (d - 1) % 7 == weekday]
+    return [d for d in range(1, cycle_length + 1) if (d - 1) % 7 == weekday]
 
 
 DEFAULT_REFERENCE_DATE = date(2026, 11, 1)
@@ -631,12 +727,13 @@ def suggest_cycle_day(
     reference_cycle_day_or_month: int = DEFAULT_REFERENCE_CYCLE_DAY,
     year: int | None = None,
     month: int | None = None,
+    cycle_length: int = CYCLE_LENGTH,
 ) -> int:
     """Día de ciclo del día 1 del mes pedido.
 
     Admite dos formas de llamada:
-    - suggest_cycle_day(year, month): usa la referencia oficial por defecto (1-nov-2026 = día 63).
-    - suggest_cycle_day(reference, reference_cycle_day, year, month): calcula desde una referencia específica.
+    - suggest_cycle_day(year, month, cycle_length=...): usa la referencia oficial por defecto (1-nov-2026 = día 63).
+    - suggest_cycle_day(reference, reference_cycle_day, year, month, cycle_length=...): calcula desde una referencia específica.
     """
     if isinstance(reference_or_year, date):
         ref_date = reference_or_year
@@ -650,7 +747,8 @@ def suggest_cycle_day(
         target_month = int(reference_cycle_day_or_month)
 
     offset = (date(target_year, target_month, 1) - ref_date).days
-    return (ref_cycle - 1 + offset) % CYCLE_LENGTH + 1
+    ref_c = (ref_cycle - 1) % cycle_length + 1
+    return (ref_c - 1 + offset) % cycle_length + 1
 
 
 def project_month(
@@ -660,14 +758,18 @@ def project_month(
     workers: tuple[WorkerProfile, ...],
     positions: tuple[str, ...] | None = None,
     position_rules: dict[str, dict] | None = None,
+    cycle_length: int | None = None,
 ) -> tuple[DaySchedule, ...]:
     """Genera el calendario diario proyectado del mes solicitado a partir del día del ciclo asignado al día 1."""
-    if not (1 <= start_cycle_day <= CYCLE_LENGTH):
-        raise ValueError(f"El día del ciclo debe estar entre 1 y {CYCLE_LENGTH} (recibido: {start_cycle_day})")
-    if not cycle_day_matches_weekday(year, month, start_cycle_day):
+    if cycle_length is None:
+        cycle_length = len(workers[0].sequence) if workers and workers[0].sequence else CYCLE_LENGTH
+
+    if not (1 <= start_cycle_day <= cycle_length):
+        raise ValueError(f"El día del ciclo debe estar entre 1 y {cycle_length} (recibido: {start_cycle_day})")
+    if not cycle_day_matches_weekday(year, month, start_cycle_day, cycle_length=cycle_length):
         raise ValueError(
             f"El día de ciclo {start_cycle_day} no coincide con el día de la semana del 1/{month}/{year}: "
-            f"el ciclo empieza en lunes. Valores compatibles: {valid_cycle_days(year, month)}"
+            f"el ciclo empieza en lunes. Valores compatibles: {valid_cycle_days(year, month, cycle_length)}"
         )
 
     active_positions = positions if positions is not None else POSITIONS
@@ -683,9 +785,9 @@ def project_month(
     schedules = []
     curr = start_date
     while curr <= end_date:
-        # Calcular el día de ciclo (1 a 168) a partir del día 1 del mes
+        # Calcular el día de ciclo (1 a cycle_length) a partir del día 1 del mes
         day_offset = curr.day - 1
-        cycle_day = ((start_cycle_day - 1 + day_offset) % CYCLE_LENGTH) + 1  # 1-indexed
+        cycle_day = ((start_cycle_day - 1 + day_offset) % cycle_length) + 1  # 1-indexed
         cycle_idx = cycle_day - 1          # 0-indexed en la secuencia
 
         is_workday_flag = is_workday(curr)
@@ -696,7 +798,8 @@ def project_month(
 
         if is_workday_flag:
             for w in workers:
-                mark = w.sequence[cycle_idx]
+                seq_idx = cycle_idx % len(w.sequence) if w.sequence else 0
+                mark = w.sequence[seq_idx]
                 if mark == "M":
                     wm.append(w.id)
                 elif mark == "T":
@@ -728,3 +831,157 @@ def project_month(
         curr += timedelta(days=1)
 
     return tuple(schedules)
+
+
+def load_sequence_records(xlsx_path: str | Path, cycle_weeks: int | None = None) -> tuple[list[dict], int]:
+    """Carga los registros detallados de secuencias de turnos con filas originales y totales."""
+    p = Path(xlsx_path)
+    if not p.exists():
+        return [], 24
+
+    if cycle_weeks is None:
+        cycle_weeks = detect_cycle_weeks(p)
+    cycle_days = cycle_weeks * 7
+
+    data = p.read_bytes()
+    _, cells = _parse_xlsx_cells(data, sheet_name_contains="secuencia")
+    max_r = max((r for r, c in cells), default=0)
+
+    records = []
+    for r in range(max_r + 1):
+        name_val = cells.get((r, 1))
+        if not isinstance(name_val, str) or not name_val.strip():
+            continue
+        name_clean = _normalize_name(name_val)
+        if any(term in name_clean for term in ("APELLIDOS", "NOMBRE", "SERVICIO", "TOTAL", "PUESTOS", "SEMANA")):
+            continue
+        num_val = cells.get((r, 0)) or len(records) + 1
+        seq = []
+        for c in range(2, 2 + cycle_days):
+            raw = str(cells.get((r, c)) or "").strip().upper()
+            if raw in ("M", "T", "D", "R"):
+                seq.append(raw)
+            else:
+                seq.append("D")
+        m_cnt = seq.count("M")
+        t_cnt = seq.count("T")
+        d_cnt = seq.count("D")
+        r_cnt = seq.count("R")
+        records.append({
+            "row": r,
+            "num": str(num_val),
+            "name": name_val.strip(),
+            "sequence": seq,
+            "m": m_cnt,
+            "t": t_cnt,
+            "d": d_cnt,
+            "r": r_cnt,
+            "total": len(seq),
+        })
+
+    return records, cycle_weeks
+
+
+def save_sequence_records(xlsx_path: str | Path, records: list[dict], cycle_weeks: int | None = None) -> None:
+    """Guarda modificaciones de marcas de turnos en el archivo Excel de secuencias."""
+    p = Path(xlsx_path)
+    if not p.exists():
+        raise FileNotFoundError(f"No se encuentra el archivo de secuencias: {xlsx_path}")
+
+    # Backup de seguridad antes de escribir
+    bak = p.with_suffix(p.suffix + ".bak")
+    shutil.copy2(p, bak)
+
+    if cycle_weeks is None:
+        cycle_weeks = detect_cycle_weeks(p)
+    cycle_days = cycle_weeks * 7
+
+    data = p.read_bytes()
+    with zipfile.ZipFile(io.BytesIO(data), "r") as zin:
+        manifest = {item.filename: zin.read(item.filename) for item in zin.infolist()}
+
+    MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    ET.register_namespace("", MAIN)
+    tree = ET.fromstring(manifest["xl/worksheets/sheet1.xml"])
+
+    # Mapa de records por número de fila XML (1-indexed)
+    rec_by_row = {r["row"] + 1: r for r in records if "row" in r}
+
+    for row_el in tree.findall(f".//{{{MAIN}}}row"):
+        r_num = int(row_el.attrib.get("r", 0))
+        if r_num not in rec_by_row:
+            continue
+        rec = rec_by_row[r_num]
+        seq = rec.get("sequence", [])
+
+        # Existentes celdas en la fila indexadas por columna (0-indexed)
+        existing_cells = {}
+        for c_el in list(row_el.findall(f"{{{MAIN}}}c")):
+            ref = c_el.attrib.get("r", "")
+            c_idx = _col_idx_from_ref(ref)
+            existing_cells[c_idx] = c_el
+
+        # Actualizar celdas de marcas (c_idx = 2 .. 2 + cycle_days - 1)
+        for i in range(min(len(seq), cycle_days)):
+            c_idx = 2 + i
+            mark = seq[i]
+            col_let = _col_letter(c_idx)
+            cell_ref = f"{col_let}{r_num}"
+
+            if c_idx in existing_cells:
+                c_el = existing_cells[c_idx]
+            else:
+                c_el = ET.SubElement(row_el, f"{{{MAIN}}}c", {"r": cell_ref, "s": "30", "t": "inlineStr"})
+                existing_cells[c_idx] = c_el
+
+            for ch in list(c_el):
+                c_el.remove(ch)
+            c_el.set("t", "inlineStr")
+            if "s" not in c_el.attrib:
+                c_el.set("s", "30")
+            is_el = ET.SubElement(c_el, f"{{{MAIN}}}is")
+            t_el = ET.SubElement(is_el, f"{{{MAIN}}}t")
+            t_el.text = mark
+
+        # Actualizar columnas de resumen: M, T, D, R, Total
+        m_cnt = seq[:cycle_days].count("M")
+        t_cnt = seq[:cycle_days].count("T")
+        d_cnt = seq[:cycle_days].count("D")
+        r_cnt = seq[:cycle_days].count("R")
+        tot_cnt = min(len(seq), cycle_days)
+
+        summary_vals = [m_cnt, t_cnt, d_cnt, r_cnt, tot_cnt]
+        for s_idx, val in enumerate(summary_vals):
+            c_idx = 2 + cycle_days + s_idx
+            col_let = _col_letter(c_idx)
+            cell_ref = f"{col_let}{r_num}"
+
+            if c_idx in existing_cells:
+                c_el = existing_cells[c_idx]
+            else:
+                c_el = ET.SubElement(row_el, f"{{{MAIN}}}c", {"r": cell_ref, "s": "33", "t": "n"})
+                existing_cells[c_idx] = c_el
+
+            for ch in list(c_el):
+                c_el.remove(ch)
+            c_el.set("t", "n")
+            if "s" not in c_el.attrib:
+                c_el.set("s", "33")
+            v_el = ET.SubElement(c_el, f"{{{MAIN}}}v")
+            v_el.text = str(val)
+
+        # Ordenar celdas por índice de columna para conformidad OpenXML estricta
+        sorted_cells = sorted(row_el.findall(f"{{{MAIN}}}c"), key=lambda c: _col_idx_from_ref(c.attrib.get("r", "")))
+        for c in list(row_el.findall(f"{{{MAIN}}}c")):
+            row_el.remove(c)
+        for c in sorted_cells:
+            row_el.append(c)
+
+    manifest["xl/worksheets/sheet1.xml"] = ET.tostring(tree, encoding="utf-8", xml_declaration=True)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
+        for fname, fcontent in manifest.items():
+            zout.writestr(fname, fcontent)
+
+    p.write_bytes(buf.getvalue())
